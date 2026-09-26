@@ -1,0 +1,141 @@
+# VDA Hub Server Controller
+
+**VDA Hub Server Controller**, Windows sunucularındaki mantıksal disk bölümlerini (C:, D: vb.) ve fiziksel diskleri (HDD/SSD/NVMe) gerçek zamanlı izleyen, SMART sağlık durumlarını denetleyen, merkezi **VDA Hub** paneline veri aktaran ve **Brevo (Sendinblue)** altyapısıyla günlük durum e-postaları ile anlık kritik alarmlar gönderen hafif, bağımsız (self-contained) bir sunucu ajanıdır (Agent).
+
+---
+
+## 🚀 Temel Özellikler
+
+- **📁 Ayrıntılı Disk & Kapasite Takibi:** Mantıksal sürücülerin toplam boyutu, boş alanı, kullanılan alanı, doluluk yüzdesi ve dosya sistemi (NTFS, ReFS vb.).
+- **💽 Fiziksel Disk & SMART Sağlık Denetimi:** WMI üzerinden fiziksel disk modeli, seri numarası, arayüz türü (NVMe/SCSI/SATA), disk türü ve SMART arıza tahmini.
+- **🌐 VDA Hub Entegrasyonu:** Merkezi Hub API'sine (`POST /api/v1/servers/report`) JSON formatında periyodik durum aktarımı (Bearer Token / X-API-Key destekli).
+- **✉️ Brevo (Sendinblue) E-Posta Raporlama:**
+  - **Günlük Durum Bülteni:** Her sabah belirlenen saatte (örn. `09:00`) sunucunun tüm disk durumunu renkli ilerleme çubukları ve sağlık rozetleri içeren modern HTML formatında e-posta olarak iletir.
+  - **Kritik Eşik Alarmı:** Disk doluluğu kritik seviyeyi (örn. `%90`) aştığında veya SMART arıza uyarısı alındığında anında acil durum uyarısı gönderir.
+  - **Aç/Kapat (Toggle) Opsiyonu:** Brevo e-posta gönderimi arayüzden veya konfigürasyondan tek tıkla açılıp kapatılabilir.
+- **🛡️ Hibrit Çalışma Modelleri:**
+  1. **Grafik Arayüz & Sistem Tepsisi (System Tray):** Görev çubuğunda simge olarak çalışır, tıklandığında modern kontrol paneli açılır.
+  2. **Headless Windows Servisi:** Kullanıcı oturumu açık olmasa bile sunucu başladığında 7/24 sessizce arka planda çalışır (`sc create`).
+  3. **CLI (Komut Satırı):** Terminal üzerinden test ve yönetim desteği.
+- **📦 Tek Bağımsız Dosya (.exe):** Sunucuda .NET veya ek hiçbir runtime kurulu olmasına gerek yoktur. Tek bir `.exe` dosyası olarak çalıştırılabilir.
+
+---
+
+## 🏗️ Mimari & Çalışma Şeması
+
+```mermaid
+flowchart TD
+    subgraph Sunucu ["Sunucu (Windows Server)"]
+        Agent["VdaHubServerController.exe\n(Servis veya Tray Modu)"]
+        WMI["Disk & SMART Monitör\n(DriveInfo + WMI Win32_DiskDrive)"]
+        Config["config.json\n(Sunucu Ayarları & Key'ler)"]
+        
+        Agent --> WMI
+        Agent --> Config
+    end
+
+    subgraph Hub ["Merkezi Yönetim"]
+        VDAHub["VDA Hub Dashboard\n(HTTP API / JSON Raporu)"]
+    end
+
+    subgraph Mail ["E-Posta Servisi"]
+        Brevo["Brevo API v3\n(smtp/email)"]
+        Email["Admin / IT E-Posta Kutusu\n(Günlük Rapor & Anlık Alarm)"]
+        Brevo --> Email
+    end
+
+    Agent -- "Her 5 dk'da JSON Raporu" --> VDAHub
+    Agent -- "Her Gün 09:00 & Kritik Eşikte" --> Brevo
+```
+
+---
+
+## 🛠️ Kurulum ve Çalıştırma
+
+### 1. Hazır .exe ile Çalıştırma
+Projeyi derlediğinizde oluşturulan `VdaHubServerController.exe` dosyasını sunucunuzda istediğiniz bir klasöre (örn. `C:\VdaHubController\`) kopyalayın:
+
+- **Arayüz ile Başlatmak İçin:** `VdaHubServerController.exe` dosyasına çift tıklayın.
+- **Windows Servisi Olarak Kurmak İçin:**
+  - Uygulama arayüzündeki **Windows Servis Modu** sekmesinden **"Servisi Kur"** butonuna basın.
+  - VEYA Yönetici Terminalinden:
+    ```cmd
+    VdaHubServerController.exe --install-service
+    VdaHubServerController.exe --start-service
+    ```
+
+---
+
+## ⚙️ Konfigürasyon (`config.json`)
+
+Uygulama ilk çalıştığında otomatik olarak `config.json` dosyasını oluşturur. Dilerseniz arayüz üzerinden, dilerseniz doğrudan bu dosyayı düzenleyerek ayarları yapabilirsiniz:
+
+```json
+{
+  "ServerId": "fd591f87-7bf9-44bd-94b7-4b15c6479f1d",
+  "ServerName": "Production-DB-01",
+  "CheckIntervalMinutes": 5,
+  "Hub": {
+    "Enabled": true,
+    "HubApiUrl": "https://hub.sirketiniz.com/api/v1/servers/report",
+    "ApiKey": "vda_hub_secret_token_123",
+    "TimeoutSeconds": 15
+  },
+  "Brevo": {
+    "Enabled": true,
+    "ApiKey": "xkeysib-YOUR_BREVO_API_KEY",
+    "SenderEmail": "server-alerts@sirketiniz.com",
+    "SenderName": "VDA Hub Controller",
+    "RecipientEmails": "admin@sirketiniz.com, sysadmin@sirketiniz.com",
+    "DailyReportTime": "09:00",
+    "SendCriticalAlertImmediately": true,
+    "WarningThresholdPercent": 80,
+    "CriticalThresholdPercent": 90
+  }
+}
+```
+
+---
+
+## ✉️ Brevo Entegrasyonu Nasıl Yapılır?
+
+1. [Brevo](https://www.brevo.com/) hesabınıza giriş yapın.
+2. Sağ üstteki profil menüsünden **SMTP & API** sekmesine gidin.
+3. Yeni bir **API Key (v3)** oluşturun (`xkeysib-...` ile başlar).
+4. `config.json` dosyasında veya uygulama arayüzündeki **Ayarlar** sekmesinde:
+   - **Brevo E-Posta Bildirimlerini Etkinleştir** seçeneğini işaretleyin.
+   - API Key'inizi, onaylanmış Gönderen E-postanızı ve Alıcı adreslerini girin.
+   - **"Brevo Test Maili Gönder"** butonuna tıklayarak bağlantıyı hemen doğrulayın.
+
+---
+
+## 💻 Komut Satırı (CLI) Parametreleri
+
+| Parametre | Açıklama |
+|---|---|
+| `(parametre yok)` | Grafik kontrol panelini (GUI) ve Sistem Tepsisi (Tray) simgesini açar. |
+| `--service` | Headless Windows Servisi modunda çalışır. |
+| `--install-service` | Uygulamayı Windows Servisi olarak kaydeder (Otomatik başlatma). |
+| `--uninstall-service`| Kurulu servisi sistemden kaldırır. |
+| `--start-service` | Kurulu servisi başlatır. |
+| `--stop-service` | Çalışan servisi durdurur. |
+| `--run-once` | Diskleri anlık olarak tarar, konsola özet yazar ve çıkar. |
+| `--test-mail` | Brevo API üzerinden test e-postası gönderir. |
+| `--test-hub` | VDA Hub uç noktasına test raporu gönderir. |
+| `--help`, `-h` | Komut satırı yardım menüsünü görüntüler. |
+
+---
+
+## 🔨 Kaynak Koddan Derleme (Build)
+
+Tek bir bağımsız `.exe` oluşturmak için:
+
+```powershell
+# PowerShell ile:
+.\build.ps1
+
+# veya Batch dosyasıyla:
+build.bat
+```
+
+Derleme sonucunda `./publish/` klasörü içinde ~50 MB boyutunda tüm .NET bağımlılıklarını içinde barındıran, harici kurulum gerektirmeyen `VdaHubServerController.exe` hazır hale gelir.

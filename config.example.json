@@ -1,0 +1,24 @@
+{
+  "ServerId": "00000000-0000-0000-0000-000000000000",
+  "ServerName": "Ana-Sunucu-01",
+  "CheckIntervalMinutes": 5,
+  "Hub": {
+    "Enabled": true,
+    "HubApiUrl": "https://hub.yourdomain.com/api/v1/servers/report",
+    "ApiKey": "YOUR_VDA_HUB_SECRET_KEY",
+    "TimeoutSeconds": 15
+  },
+  "Brevo": {
+    "Enabled": true,
+    "ApiKey": "xkeysib-YOUR_BREVO_API_KEY",
+    "SenderEmail": "server-alerts@yourdomain.com",
+    "SenderName": "VDA Hub Controller",
+    "RecipientEmails": "admin@yourdomain.com, it-support@yourdomain.com",
+    "DailyReportTime": "09:00",
+    "SendCriticalAlertImmediately": true,
+    "WarningThresholdPercent": 80,
+    "CriticalThresholdPercent": 90,
+    "LastDailyReportDate": "",
+    "LastCriticalAlertSentAt": null
+  }
+}

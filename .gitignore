@@ -1,0 +1,16 @@
+## .NET Core / C#
+bin/
+obj/
+publish/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Sensitive config with API keys
+config.json
+.perm_test
+
+## Logs
+*.log
+logs/
