@@ -10,6 +10,14 @@ public class ServerStatusReport
     public string OverallStatus { get; set; } = "HEALTHY"; // "HEALTHY", "WARNING", "CRITICAL"
     public string SummaryMessage { get; set; } = string.Empty;
 
+    // CPU & RAM metrics
+    public double? CpuUsagePercent { get; set; }
+    public double? RamTotalGb { get; set; }
+    public double? RamUsedGb { get; set; }
+    public double? RamFreeGb { get; set; }
+    public double? RamUsagePercent { get; set; }
+    public string? PublicIp { get; set; }
+
     public List<DiskVolumeInfo> Volumes { get; set; } = new();
     public List<PhysicalDiskInfo> PhysicalDisks { get; set; } = new();
 

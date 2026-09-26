@@ -126,7 +126,47 @@ public class DiskMonitorService
             // SMART prediction query might not be supported on all RAID/NVMe controllers or requires elevated token, safely ignore
         }
 
-        // 4. Calculate overall status based on thresholds
+        // 4. Collect RAM (Memory) Usage via WMI
+        try
+        {
+            using var osSearcher = new ManagementObjectSearcher("SELECT TotalVisibleMemorySize, FreePhysicalMemory FROM Win32_OperatingSystem");
+            foreach (ManagementObject os in osSearcher.Get())
+            {
+                if (ulong.TryParse(os["TotalVisibleMemorySize"]?.ToString(), out ulong totalKb) &&
+                    ulong.TryParse(os["FreePhysicalMemory"]?.ToString(), out ulong freeKb))
+                {
+                    ulong usedKb = totalKb > freeKb ? totalKb - freeKb : 0;
+                    report.RamTotalGb = Math.Round(totalKb / 1048576.0, 2);
+                    report.RamFreeGb = Math.Round(freeKb / 1048576.0, 2);
+                    report.RamUsedGb = Math.Round(usedKb / 1048576.0, 2);
+                    report.RamUsagePercent = totalKb > 0 ? Math.Round(((double)usedKb / totalKb) * 100.0, 1) : 0;
+                }
+            }
+        }
+        catch
+        {
+            // Silently ignore if WMI memory query fails
+        }
+
+        // 5. Collect CPU Load Percentage via WMI
+        try
+        {
+            using var cpuSearcher = new ManagementObjectSearcher("SELECT LoadPercentage FROM Win32_Processor");
+            foreach (ManagementObject cpu in cpuSearcher.Get())
+            {
+                if (double.TryParse(cpu["LoadPercentage"]?.ToString(), out double load))
+                {
+                    report.CpuUsagePercent = Math.Round(load, 1);
+                    break;
+                }
+            }
+        }
+        catch
+        {
+            // Silently ignore if CPU query fails
+        }
+
+        // 6. Calculate overall status based on thresholds
         report.RecalculateOverallStatus(
             warningThreshold: config.Brevo.WarningThresholdPercent,
             criticalThreshold: config.Brevo.CriticalThresholdPercent
