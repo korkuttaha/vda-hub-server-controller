@@ -85,6 +85,29 @@ public static class WindowsServiceManager
         return RunSc($"stop \"{ServiceName}\"");
     }
 
+    public static (bool Success, string Output) RestartService()
+    {
+        if (!IsServiceInstalled())
+            return (false, $"'{DisplayName}' yüklü değil; eşleştirme kaydedildi fakat servis yeniden başlatılamadı.");
+
+        var stop = StopService();
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (DateTime.UtcNow < deadline)
+        {
+            var status = GetServiceStatus();
+            if (status.StartsWith("Durduruldu", StringComparison.Ordinal)) break;
+            Thread.Sleep(250);
+        }
+
+        if (!GetServiceStatus().StartsWith("Durduruldu", StringComparison.Ordinal))
+            return (false, "Yeni eşleştirme kaydedildi fakat servis zamanında durmadı: " + stop.Output);
+
+        var start = StartService();
+        return start.Success
+            ? (true, "Sunucu yeniden eşleştirildi ve headless servis yeni anahtarla yeniden başlatıldı.")
+            : (false, "Yeni eşleştirme kaydedildi fakat servis yeniden başlatılamadı: " + start.Output);
+    }
+
     public static bool IsServiceInstalled()
     {
         var res = RunSc($"query \"{ServiceName}\"");

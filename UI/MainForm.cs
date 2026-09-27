@@ -35,6 +35,7 @@ public class MainForm : Form
     private CheckBox _chkHubEnabled = null!;
     private TextBox _txtHubUrl = null!;
     private TextBox _txtHubApiKey = null!;
+    private Button _btnReEnroll = null!;
     private CheckBox _chkBrevoEnabled = null!;
     private TextBox _txtBrevoApiKey = null!;
     private TextBox _txtBrevoSenderEmail = null!;
@@ -308,7 +309,7 @@ public class MainForm : Form
         {
             Text = "🌐 VDA Hub Entegrasyonu",
             Location = new Point(15, y),
-            Size = new Size(810, 140),
+            Size = new Size(810, 170),
             Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
         };
 
@@ -317,14 +318,31 @@ public class MainForm : Form
         var lblHubUrl = new Label { Text = "Hub API URL:", Location = new Point(20, 60), AutoSize = true, Font = new Font("Segoe UI", 9.0f) };
         _txtHubUrl = new TextBox { Location = new Point(160, 57), Size = new Size(450, 24), Font = new Font("Segoe UI", 9.0f) };
 
-        var lblHubKey = new Label { Text = "Sunucu API Anahtarı:", Location = new Point(20, 95), AutoSize = true, Font = new Font("Segoe UI", 9.0f) };
-        _txtHubApiKey = new TextBox { Location = new Point(160, 92), Size = new Size(450, 24), Font = new Font("Segoe UI", 9.0f), UseSystemPasswordChar = true, ReadOnly = true };
+        var lblHubKey = new Label { Text = "Kalıcı API Anahtarı:", Location = new Point(20, 95), AutoSize = true, Font = new Font("Segoe UI", 9.0f) };
+        _txtHubApiKey = new TextBox
+        {
+            Location = new Point(160, 92),
+            Size = new Size(450, 24),
+            Font = new Font("Segoe UI", 9.0f),
+            UseSystemPasswordChar = true,
+            ReadOnly = true,
+            BackColor = SystemColors.Window,
+            TabStop = false
+        };
+        var lblHubKeyHelp = new Label
+        {
+            Text = "Kalıcı anahtar elle değiştirilmez. Hub'dan aldığınız vda_setup_... anahtarıyla yeniden eşleştirin.",
+            Location = new Point(160, 120),
+            Size = new Size(450, 35),
+            ForeColor = Color.FromArgb(71, 85, 105),
+            Font = new Font("Segoe UI", 8.5f)
+        };
 
         _btnTestHub = new Button
         {
             Text = "Hub Test Gönder",
-            Location = new Point(630, 70),
-            Size = new Size(150, 35),
+            Location = new Point(630, 52),
+            Size = new Size(150, 32),
             BackColor = Color.FromArgb(79, 70, 229),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
@@ -334,10 +352,28 @@ public class MainForm : Form
         _btnTestHub.FlatAppearance.BorderSize = 0;
         _btnTestHub.Click += async (s, e) => await TriggerTestHub();
 
-        grpHub.Controls.AddRange(new Control[] { _chkHubEnabled, lblHubUrl, _txtHubUrl, lblHubKey, _txtHubApiKey, _btnTestHub });
+        _btnReEnroll = new Button
+        {
+            Text = "Yeniden Eşleştir",
+            Location = new Point(630, 92),
+            Size = new Size(150, 32),
+            BackColor = Color.FromArgb(37, 99, 235),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat,
+            Font = new Font("Segoe UI", 9.0f, FontStyle.Bold),
+            Cursor = Cursors.Hand
+        };
+        _btnReEnroll.FlatAppearance.BorderSize = 0;
+        _btnReEnroll.Click += async (_, _) => await ReEnrollAsync();
+
+        grpHub.Controls.AddRange(new Control[]
+        {
+            _chkHubEnabled, lblHubUrl, _txtHubUrl, lblHubKey, _txtHubApiKey,
+            lblHubKeyHelp, _btnTestHub, _btnReEnroll
+        });
         tab.Controls.Add(grpHub);
 
-        y += 155;
+        y += 185;
 
         // Group 3: Brevo Email Settings
         var grpBrevo = new GroupBox
@@ -427,7 +463,7 @@ public class MainForm : Form
         };
         var description = new Label
         {
-            Text = "Bu sunucuda yedeklenecek klasörleri Windows klasör seçicisiyle belirleyin. Yedek yalnız Hub'daki YEDEKLE komutuyla başlar ve yeni bir tarih klasörüne tüm dosyaları yükler.",
+            Text = "Bu sunucuda yedeklenecek tam klasör yollarını ekleyin. Yedek yalnız Hub'daki YEDEKLE komutuyla başlar ve yeni bir tarih klasörüne tüm dosyaları yükler.",
             Location = new Point(20, 50),
             Size = new Size(790, 45),
             ForeColor = Color.FromArgb(71, 85, 105)
@@ -493,7 +529,7 @@ public class MainForm : Form
 
         var safety = new Label
         {
-            Text = "Otomatik zamanlama ve otomatik silme yoktur. Koruma: 500+ dosya, en az 100 dosyalık sette %15+ değişiklik veya 100+ şüpheli yeniden adlandırma görülürse snapshot başlamadan durur.",
+            Text = "Otomatik zamanlama ve otomatik silme yoktur. Olağan dışı toplu değişiklikte snapshot durur ve Hub onayı ister.",
             Location = new Point(20, 520),
             Size = new Size(790, 50),
             ForeColor = Color.FromArgb(146, 64, 14)
@@ -719,15 +755,45 @@ public class MainForm : Form
 
     private void AddBackupFolder()
     {
-        using var dialog = new FolderBrowserDialog
-        {
-            Description = "Dropbox'a yedeklenecek klasörü seçin",
-            ShowNewFolderButton = false,
-            UseDescriptionForTitle = true
-        };
-        if (dialog.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(dialog.SelectedPath)) return;
+        using var dialog = new FolderPathForm();
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
         if (!_lstBackupFolders.Items.Cast<string>().Contains(dialog.SelectedPath, StringComparer.OrdinalIgnoreCase))
             _lstBackupFolders.Items.Add(dialog.SelectedPath);
+    }
+
+    private async Task ReEnrollAsync()
+    {
+        var confirmation = MessageBox.Show(
+            "Hub'da bu mevcut sunucu kaydı için yeni bir Kurulum Anahtarı üretin. " +
+            "Yeniden eşleştirme başarılı olduğunda kalıcı API anahtarı güvenli biçimde değiştirilecek ve servis yeniden başlatılacak. Devam edilsin mi?",
+            "VDA Hub ile yeniden eşleştir",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Information);
+        if (confirmation != DialogResult.Yes) return;
+
+        using var enrollment = new EnrollmentForm(new EnrollmentService(_configService))
+        {
+            StartPosition = FormStartPosition.CenterParent
+        };
+        if (enrollment.ShowDialog(this) != DialogResult.OK) return;
+
+        _btnReEnroll.Enabled = false;
+        try
+        {
+            var restart = await Task.Run(WindowsServiceManager.RestartService);
+            LoadSettingsIntoUI();
+            await LoadBackupPlanAsync();
+            MessageBox.Show(
+                restart.Output,
+                restart.Success ? "Yeniden eşleştirme tamamlandı" : "Servis yeniden başlatılamadı",
+                MessageBoxButtons.OK,
+                restart.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+            RefreshServiceStatus();
+        }
+        finally
+        {
+            _btnReEnroll.Enabled = true;
+        }
     }
 
     private async Task SaveBackupPlanAsync()
