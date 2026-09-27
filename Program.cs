@@ -40,6 +40,12 @@ internal static class Program
         // 3. Command-line: Service Installation / Lifecycle
         if (args.Contains("--install-service", StringComparer.OrdinalIgnoreCase))
         {
+            var installConfig = new ConfigService();
+            if (!EnrollmentService.IsEnrolled(installConfig.Current))
+            {
+                Console.WriteLine("Önce EXE'yi normal açıp Hub Kurulum Anahtarı ile eşleştirin.");
+                return 1;
+            }
             string exePath = Environment.ProcessPath ?? AppDomain.CurrentDomain.BaseDirectory;
             var (success, msg) = WindowsServiceManager.InstallService(exePath);
             Console.WriteLine(msg);
@@ -121,6 +127,16 @@ internal static class Program
 
         ApplicationConfiguration.Initialize();
 
+        if (!EnrollmentService.IsEnrolled(configService.Current))
+        {
+            using var enrollmentForm = new EnrollmentForm(new EnrollmentService(configService));
+            if (enrollmentForm.ShowDialog() != DialogResult.OK)
+            {
+                _singleInstanceMutex.ReleaseMutex();
+                return 1;
+            }
+        }
+
         // Start background worker loop for the GUI session
         using var cts = new CancellationTokenSource();
         _ = Task.Run(() => engine.StartLoopAsync(cts.Token));
@@ -157,8 +173,9 @@ Seçenekler:
   --backup-now        : Dropbox klasör yedeklemesini zaman beklemeden çalıştırır.
   --help, -h          : Bu yardım menüsünü görüntüler.
 
-Konfigürasyon:
-  Uygulama dizinindeki 'config.json' dosyası veya UI Ayarlar sekmesi üzerinden yönetilir.
+İlk kurulum:
+  Hub > Sunucular ekranında sunucu kaydını açın ve tek kullanımlık Kurulum Anahtarını alın.
+  EXE ilk açılışta bu anahtarı sorar; ServerId ve kalıcı API anahtarı otomatik kaydedilir.
 ");
     }
 
