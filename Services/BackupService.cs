@@ -43,7 +43,8 @@ public sealed record BackupExecutionResult(
     int FilesScanned = 0,
     int FilesUploaded = 0,
     long BytesUploaded = 0,
-    bool RequiresApproval = false);
+    bool RequiresApproval = false,
+    int SkippedFiles = 0);
 
 public sealed class BackupService
 {
@@ -60,6 +61,7 @@ public sealed class BackupService
         public int LastFilesScanned { get; set; }
         public int LastFilesUploaded { get; set; }
         public long LastBytesUploaded { get; set; }
+        public List<string> LastSkippedFiles { get; set; } = [];
         public List<StateFile> Files { get; set; } = [];
     }
 
@@ -71,10 +73,24 @@ public sealed class BackupService
         public bool Deleted { get; set; }
     }
 
-    private sealed record CurrentFile(FileInfo File, string Root, string RootLabel, string Relative);
+    private sealed record CurrentFile(
+        FileInfo File,
+        string Root,
+        string RootLabel,
+        string Relative,
+        long ScannedLength,
+        long ScannedLastWriteUtcTicks);
     private sealed record Change(string Path, CurrentFile Item, StateFile? Previous, string Kind);
     private sealed record ArchiveArtifact(FileInfo File, IReadOnlyList<CurrentFile> SourceFiles);
+    private sealed record SkippedArchiveFile(CurrentFile Source, string Reason);
+    private sealed record ArchiveBuildResult(
+        IReadOnlyList<ArchiveArtifact> Artifacts,
+        IReadOnlyList<SkippedArchiveFile> SkippedFiles);
     private sealed class BackupStopRequestedException : OperationCanceledException { }
+    private sealed class UnstableArchiveFileException(CurrentFile source, string reason) : IOException(reason)
+    {
+        public CurrentFile FileItem { get; } = source;
+    }
 
     public BackupService(ConfigService config)
     {
@@ -156,10 +172,16 @@ public sealed class BackupService
             var state = LoadState();
             if (state.LastCompletedRequestId == command.RequestId && !string.IsNullOrWhiteSpace(state.LastCompletedSnapshotPath))
             {
+                var replayWarning = BuildSkippedFilesWarning(state.LastSkippedFiles);
                 await ReportAsync(command.RequestId, true, state.LastFilesScanned, state.LastFilesUploaded,
-                    state.LastBytesUploaded, state.LastCompletedSnapshotPath, null, ct: ct);
+                    state.LastBytesUploaded, state.LastCompletedSnapshotPath, null,
+                    skippedFilesCount: state.LastSkippedFiles.Count,
+                    skippedFiles: state.LastSkippedFiles,
+                    warning: replayWarning,
+                    ct: ct);
                 return new(false, true, "Tamamlanan snapshot sonucu Hub'a yeniden bildirildi.",
-                    state.LastFilesScanned, state.LastFilesUploaded, state.LastBytesUploaded);
+                    state.LastFilesScanned, state.LastFilesUploaded, state.LastBytesUploaded,
+                    SkippedFiles: state.LastSkippedFiles.Count);
             }
 
             if (!await StartRequestAsync(command.RequestId, ct))
@@ -189,7 +211,7 @@ public sealed class BackupService
                 return new(true, false, error, scan.Files.Count);
             }
 
-            var totalBytes = scan.Files.Values.Sum(x => x.File.Length);
+            var totalBytes = scan.Files.Values.Sum(x => x.ScannedLength);
             if (await ReportProgressAsync(command.RequestId, "preparing", scan.Files.Count, 0, 0, totalBytes, ct))
                 throw new BackupStopRequestedException();
 
@@ -210,15 +232,15 @@ public sealed class BackupService
                 var kind = "N";
                 var changed = previous is null;
                 if (previous is not null &&
-                    (previous.Deleted || previous.Length != pair.Value.File.Length ||
-                     previous.LastWriteUtcTicks != pair.Value.File.LastWriteTimeUtc.Ticks))
+                    (previous.Deleted || previous.Length != pair.Value.ScannedLength ||
+                     previous.LastWriteUtcTicks != pair.Value.ScannedLastWriteUtcTicks))
                 {
                     kind = "M";
                     changed = true;
                 }
                 if (!changed) continue;
                 changes.Add(new(pair.Key, pair.Value, previous, kind));
-                descriptors.Add($"{kind}|{pair.Key}|{pair.Value.File.Length}|{pair.Value.File.LastWriteTimeUtc.Ticks}");
+                descriptors.Add($"{kind}|{pair.Key}|{pair.Value.ScannedLength}|{pair.Value.ScannedLastWriteUtcTicks}");
             }
 
             var renameLike = 0;
@@ -262,6 +284,8 @@ public sealed class BackupService
             var errors = new List<string>();
             var filesUploaded = 0;
             long bytesUploaded = 0;
+            IReadOnlyList<CurrentFile> snapshotFiles = scan.Files.Values.ToArray();
+            IReadOnlyList<SkippedArchiveFile> skippedArchiveFiles = [];
             var lastProgressAtUtc = DateTime.MinValue;
             var chunkSize = Math.Clamp(plan.ChunkSizeBytes, 1024 * 1024, 64 * 1024 * 1024);
             await EnsureFolderPathAsync(stagingRoot, accessToken, folders, ct);
@@ -295,12 +319,20 @@ public sealed class BackupService
                         totalBytes,
                         ct))
                     throw new BackupStopRequestedException();
-                var artifacts = await CreateArchivesAsync(
+                var archiveBuild = await CreateArchivesAsync(
                     scan.Files.Values,
                     temporaryRoot,
                     command,
                     PushCompressionProgressAsync,
                     ct);
+                var artifacts = archiveBuild.Artifacts;
+                skippedArchiveFiles = archiveBuild.SkippedFiles;
+                var skippedPaths = skippedArchiveFiles
+                    .Select(x => x.Source.File.FullName)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                snapshotFiles = scan.Files.Values
+                    .Where(x => !skippedPaths.Contains(x.File.FullName))
+                    .ToArray();
                 await PushCompressionProgressAsync(scan.Files.Count, totalBytes, true);
 
                 var archiveTotalBytes = artifacts.Sum(x => x.File.Length);
@@ -444,11 +476,11 @@ public sealed class BackupService
                     null, ex.Message, false, null, changedFiles, changedPercent, renameLike, ct: ct);
                 return new(true, false, ex.Message, scan.Files.Count, filesUploaded, bytesUploaded);
             }
-            state.Files = scan.Files.Select(pair => new StateFile
+            state.Files = snapshotFiles.Select(item => new StateFile
             {
-                Path = pair.Key,
-                Length = pair.Value.File.Length,
-                LastWriteUtcTicks = pair.Value.File.LastWriteTimeUtc.Ticks,
+                Path = item.File.FullName,
+                Length = item.ScannedLength,
+                LastWriteUtcTicks = item.ScannedLastWriteUtcTicks,
                 Deleted = false
             }).OrderBy(x => x.Path, StringComparer.OrdinalIgnoreCase).ToList();
             state.LastCompletedRequestId = command.RequestId;
@@ -456,13 +488,23 @@ public sealed class BackupService
             state.LastFilesScanned = scan.Files.Count;
             state.LastFilesUploaded = filesUploaded;
             state.LastBytesUploaded = bytesUploaded;
+            state.LastSkippedFiles = skippedArchiveFiles.Select(x => x.Source.File.FullName).ToList();
             SaveState(state);
 
+            var warning = BuildSkippedFilesWarning(state.LastSkippedFiles);
             await ReportAsync(command.RequestId, true, scan.Files.Count, filesUploaded, bytesUploaded,
-                finalRoot, null, false, null, changedFiles, changedPercent, renameLike, ct: ct);
+                finalRoot, null, false, null, changedFiles, changedPercent, renameLike,
+                skippedFilesCount: state.LastSkippedFiles.Count,
+                skippedFiles: state.LastSkippedFiles,
+                warning: warning,
+                ct: ct);
+            var skippedSuffix = state.LastSkippedFiles.Count > 0
+                ? $" {state.LastSkippedFiles.Count} değişken dosya atlandı."
+                : string.Empty;
             return new(true, true,
-                $"Tarih damgalı snapshot tamamlandı: {filesUploaded}/{scan.Files.Count} dosya, {FormatBytes(bytesUploaded)}.",
-                scan.Files.Count, filesUploaded, bytesUploaded);
+                $"Tarih damgalı snapshot tamamlandı: {filesUploaded}/{scan.Files.Count} dosya, {FormatBytes(bytesUploaded)}.{skippedSuffix}",
+                scan.Files.Count, filesUploaded, bytesUploaded,
+                SkippedFiles: state.LastSkippedFiles.Count);
         }
         catch (BackupStopRequestedException)
         {
@@ -551,7 +593,7 @@ public sealed class BackupService
         return temporaryRoot;
     }
 
-    private static async Task<List<ArchiveArtifact>> CreateArchivesAsync(
+    private static async Task<ArchiveBuildResult> CreateArchivesAsync(
         IEnumerable<CurrentFile> files,
         string temporaryRoot,
         ManualBackupRequest command,
@@ -570,66 +612,141 @@ public sealed class BackupService
             })
             .ToArray();
         var artifacts = new List<ArchiveArtifact>();
-        var filesCompressed = 0;
-        long bytesCompressed = 0;
+        var skipped = new Dictionary<string, SkippedArchiveFile>(StringComparer.OrdinalIgnoreCase);
+        var progressFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var sourceBytes = groups.Sum(group => group.Files.Sum(item => item.ScannedLength));
+        long progressBytesHighWater = 0;
+        long committedBytes = 0;
         var buffer = new byte[1024 * 1024];
 
         foreach (var group in groups)
         {
             ct.ThrowIfCancellationRequested();
             var archivePath = Path.Combine(temporaryRoot, group.RootLabel + ".zip");
-            await using (var archiveStream = new FileStream(
-                             archivePath,
-                             FileMode.CreateNew,
-                             FileAccess.ReadWrite,
-                             FileShare.None,
-                             buffer.Length,
-                             true))
-            using (var archive = new ZipArchive(archiveStream, ZipArchiveMode.Create, leaveOpen: false))
+            var buildingPath = archivePath + ".building";
+            IReadOnlyList<CurrentFile> includedFiles;
+
+            while (true)
             {
-                foreach (var item in group.Files)
+                ct.ThrowIfCancellationRequested();
+                foreach (var item in group.Files.Where(item => !skipped.ContainsKey(item.File.FullName)))
                 {
-                    ct.ThrowIfCancellationRequested();
-                    var initialLength = item.File.Length;
-                    var initialTicks = item.File.LastWriteTimeUtc.Ticks;
-                    var entry = archive.CreateEntry(item.Relative.Replace('\\', '/'), CompressionLevel.Fastest);
-                    await using var source = new FileStream(
-                        item.File.FullName,
-                        FileMode.Open,
-                        FileAccess.Read,
-                        FileShare.ReadWrite,
-                        buffer.Length,
-                        true);
-                    await using var destination = entry.Open();
-                    while (true)
+                    if (!TryReadCurrentMetadata(item, out var reason))
                     {
-                        var read = await source.ReadAsync(buffer, ct);
-                        if (read == 0) break;
-                        await destination.WriteAsync(buffer.AsMemory(0, read), ct);
-                        bytesCompressed += read;
-                        await progress(filesCompressed, bytesCompressed, false);
+                        skipped[item.File.FullName] = new(item, reason);
+                        progressFiles.Add(item.File.FullName);
                     }
-
-                    item.File.Refresh();
-                    if (item.File.Length != initialLength || item.File.LastWriteTimeUtc.Ticks != initialTicks)
-                        throw new IOException($"Dosya arşivlenirken değişti; snapshot tamamlanmadı: {item.File.FullName}");
-                    filesCompressed++;
-                    await progress(filesCompressed, bytesCompressed, false);
                 }
-            }
 
-            using (var verification = ZipFile.OpenRead(archivePath))
-            {
-                if (verification.Entries.Count != group.Files.Count)
-                    throw new InvalidDataException($"ZIP doğrulaması başarısız: {archivePath}");
+                includedFiles = group.Files
+                    .Where(item => !skipped.ContainsKey(item.File.FullName))
+                    .ToArray();
+                if (File.Exists(buildingPath)) File.Delete(buildingPath);
+                var retry = false;
+                long attemptBytes = 0;
+                try
+                {
+                    await using (var archiveStream = new FileStream(
+                                     buildingPath,
+                                     FileMode.CreateNew,
+                                     FileAccess.ReadWrite,
+                                     FileShare.None,
+                                     buffer.Length,
+                                     true))
+                    using (var archive = new ZipArchive(archiveStream, ZipArchiveMode.Create, leaveOpen: false))
+                    {
+                        foreach (var item in includedFiles)
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            if (!TryReadCurrentMetadata(item, out var reason))
+                                throw new UnstableArchiveFileException(item, reason);
+
+                            var entry = archive.CreateEntry(item.Relative.Replace('\\', '/'), CompressionLevel.Fastest);
+                            FileStream source;
+                            try
+                            {
+                                source = new FileStream(
+                                    item.File.FullName,
+                                    FileMode.Open,
+                                    FileAccess.Read,
+                                    FileShare.ReadWrite | FileShare.Delete,
+                                    buffer.Length,
+                                    true);
+                            }
+                            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                            {
+                                throw new UnstableArchiveFileException(
+                                    item,
+                                    "Dosya sıkıştırma sırasında okunamadı: " + ex.Message);
+                            }
+                            await using (source)
+                            {
+                                await using var destination = entry.Open();
+                                var remaining = item.ScannedLength;
+                                while (remaining > 0)
+                                {
+                                    var requested = (int)Math.Min(buffer.Length, remaining);
+                                    int read;
+                                    try
+                                    {
+                                        read = await source.ReadAsync(buffer.AsMemory(0, requested), ct);
+                                    }
+                                    catch (IOException ex)
+                                    {
+                                        throw new UnstableArchiveFileException(
+                                            item,
+                                            "Dosya sıkıştırma sırasında okunamadı: " + ex.Message);
+                                    }
+                                    if (read == 0)
+                                        throw new UnstableArchiveFileException(
+                                            item,
+                                            "Dosya sıkıştırma sırasında küçüldü veya kullanılamaz oldu.");
+                                    await destination.WriteAsync(buffer.AsMemory(0, read), ct);
+                                    remaining -= read;
+                                    attemptBytes += read;
+                                    progressBytesHighWater = Math.Min(
+                                        sourceBytes,
+                                        Math.Max(progressBytesHighWater, committedBytes + attemptBytes));
+                                    await progress(progressFiles.Count, progressBytesHighWater, false);
+                                }
+                            }
+
+                            if (!TryReadCurrentMetadata(item, out reason))
+                                throw new UnstableArchiveFileException(item, reason);
+                            progressFiles.Add(item.File.FullName);
+                            await progress(progressFiles.Count, progressBytesHighWater, false);
+                        }
+                    }
+                }
+                catch (UnstableArchiveFileException ex)
+                {
+                    skipped[ex.FileItem.File.FullName] = new(ex.FileItem, ex.Message);
+                    progressFiles.Add(ex.FileItem.File.FullName);
+                    retry = true;
+                }
+
+                if (retry)
+                {
+                    if (File.Exists(buildingPath)) File.Delete(buildingPath);
+                    continue;
+                }
+
+                using (var verification = ZipFile.OpenRead(buildingPath))
+                {
+                    if (verification.Entries.Count != includedFiles.Count)
+                        throw new InvalidDataException($"ZIP doğrulaması başarısız: {archivePath}");
+                }
+                File.Move(buildingPath, archivePath, true);
+                committedBytes += includedFiles.Sum(item => item.ScannedLength);
+                break;
             }
-            artifacts.Add(new ArchiveArtifact(new FileInfo(archivePath), group.Files));
+            artifacts.Add(new ArchiveArtifact(new FileInfo(archivePath), includedFiles));
         }
 
         var manifestPath = Path.Combine(temporaryRoot, "manifest.json");
         var manifest = new
         {
-            formatVersion = 1,
+            formatVersion = 2,
             command.RequestId,
             command.SnapshotFolder,
             createdAtUtc = DateTime.UtcNow,
@@ -638,12 +755,19 @@ public sealed class BackupService
                 fileName = group.RootLabel + ".zip",
                 group.RootLabel,
                 sourcePath = group.Files.FirstOrDefault()?.Root,
-                files = group.Files.Select(item => new
+                files = group.Files.Where(item => !skipped.ContainsKey(item.File.FullName)).Select(item => new
                 {
                     path = item.Relative.Replace('\\', '/'),
-                    size = item.File.Length,
-                    lastWriteAtUtc = item.File.LastWriteTimeUtc
+                    size = item.ScannedLength,
+                    lastWriteAtUtc = new DateTime(item.ScannedLastWriteUtcTicks, DateTimeKind.Utc)
                 })
+            }),
+            skippedFiles = skipped.Values.Select(item => new
+            {
+                sourcePath = item.Source.File.FullName,
+                item.Source.RootLabel,
+                path = item.Source.Relative.Replace('\\', '/'),
+                item.Reason
             })
         };
         await File.WriteAllTextAsync(
@@ -651,7 +775,48 @@ public sealed class BackupService
             JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }),
             ct);
         artifacts.Add(new ArchiveArtifact(new FileInfo(manifestPath), []));
-        return artifacts;
+        return new ArchiveBuildResult(artifacts, skipped.Values.ToArray());
+    }
+
+    private static bool TryReadCurrentMetadata(CurrentFile item, out string reason)
+    {
+        try
+        {
+            var current = new FileInfo(item.File.FullName);
+            if (!current.Exists)
+            {
+                reason = "Dosya taramadan sonra kayboldu.";
+                return false;
+            }
+            if (current.Length != item.ScannedLength ||
+                current.LastWriteTimeUtc.Ticks != item.ScannedLastWriteUtcTicks)
+            {
+                reason = "Dosya taramadan sonra veya sıkıştırma sırasında değişti.";
+                return false;
+            }
+            reason = string.Empty;
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            reason = "Dosya taramadan sonra okunamadı: " + ex.Message;
+            return false;
+        }
+    }
+
+    private static string? BuildSkippedFilesWarning(IReadOnlyCollection<string> skippedFiles)
+    {
+        if (skippedFiles.Count == 0) return null;
+        var examples = string.Join(" · ", skippedFiles.Take(3).Select(CompactReportedPath));
+        var remainder = skippedFiles.Count > 3 ? $" · +{skippedFiles.Count - 3} dosya" : string.Empty;
+        return $"{skippedFiles.Count} değişken dosya snapshot dışında bırakıldı: {examples}{remainder}";
+    }
+
+    private static string CompactReportedPath(string path)
+    {
+        const int maxLength = 1024;
+        if (path.Length <= maxLength) return path;
+        return "…" + path[^Math.Min(maxLength - 1, path.Length)..];
     }
 
     private static void DeleteTemporaryRoot(string? temporaryRoot)
@@ -673,7 +838,13 @@ public sealed class BackupService
                 foreach (var file in EnumerateFilesSafe(root))
                 {
                     var relative = Path.GetRelativePath(root, file.FullName).Replace('\\', '/');
-                    files[file.FullName] = new(file, root, rootLabel, relative);
+                    files[file.FullName] = new(
+                        file,
+                        root,
+                        rootLabel,
+                        relative,
+                        file.Length,
+                        file.LastWriteTimeUtc.Ticks);
                 }
             }
             catch (Exception ex)
@@ -771,6 +942,9 @@ public sealed class BackupService
         double changedPercent = 0,
         int renameLikeChanges = 0,
         bool cancelled = false,
+        int skippedFilesCount = 0,
+        IReadOnlyList<string>? skippedFiles = null,
+        string? warning = null,
         CancellationToken ct = default)
     {
         var settings = _config.Current.Hub;
@@ -790,7 +964,10 @@ public sealed class BackupService
             changedFiles,
             changedPercent,
             renameLikeChanges,
-            cancelled
+            cancelled,
+            skippedFilesCount,
+            skippedFiles = skippedFiles?.Take(20).Select(CompactReportedPath).ToArray() ?? [],
+            warning
         }, JsonOptions());
         using var request = Authorized(HttpMethod.Post, new Uri(baseUri, "/api/server-controller/bridge/backup-result"), settings.ApiKey);
         request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
@@ -1020,6 +1197,7 @@ public sealed class BackupService
             var state = JsonSerializer.Deserialize<State>(File.ReadAllText(_statePath), JsonOptions())
                 ?? throw new InvalidDataException("Yerel yedekleme durumu boş.");
             state.Files ??= [];
+            state.LastSkippedFiles ??= [];
             return state;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)

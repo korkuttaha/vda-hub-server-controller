@@ -10,8 +10,9 @@
 - **💽 Fiziksel Disk & SMART Sağlık Denetimi:** WMI üzerinden fiziksel disk modeli, seri numarası, arayüz türü (NVMe/SCSI/SATA), disk türü ve SMART arıza tahmini.
 - **🌐 VDA Hub Entegrasyonu:** Merkezi Hub API'sine (`POST /api/v1/servers/report`) JSON formatında periyodik durum aktarımı (Bearer Token / X-API-Key destekli).
 - **🔑 Generic EXE eşleştirmesi:** Aynı EXE bütün sunucularda kullanılır; ilk açılışta Hub'ın tek kullanımlık Kurulum Anahtarı girilir.
-- **☁️ Manuel tam Dropbox snapshot:** Agent'ın uygulama içi seçicisinden veya Hub'dan kaydedilen klasörleri iki yönlü eşitler; yalnız Hub'daki **YEDEKLE** komutuyla bütün dosyaları `VDAKor Hub/VDA Backups/Sunucu/Tarih` altına yükler. Zamanlama ve otomatik silme yoktur.
+- **☁️ Manuel tam Dropbox snapshot:** Agent'ın uygulama içi seçicisinden veya Hub'dan kaydedilen klasörleri iki yönlü eşitler; yalnız Hub'daki **YEDEKLE** komutuyla bütün dosyaları `VDA Backups/Sunucu/Tarih` altına yükler. Zamanlama ve otomatik silme yoktur.
 - **📦 Hızlı ZIP64 modu:** Önerilen modda her seçili klasörü ayrı ZIP64 arşivine dönüştürür, manifest üretir, geçici disk alanını önceden denetler ve Dropbox API istek sayısını azaltır. Harici 7-Zip kurulumu gerekmez; ayrı-dosya modu da seçilebilir.
+- **⚠️ Değişken dosya toleransı:** Tarama veya sıkıştırma sırasında değişen canlı dosyalar yarım ZIP girdisi bırakmadan dışarıda tutulur; snapshot diğer dosyalarla tamamlanır ve atlanan yollar manifest ile Hub'da uyarı olarak gösterilir.
 - **📈 Canlı yedekleme ilerlemesi:** Tarama, hazırlık, sıkıştırma, yükleme ve tamamlama aşamalarını; dosya ve bayt sayaçlarını Hub'a periyodik olarak bildirir.
 - **⏹️ Güvenli uzaktan durdurma:** Hub'daki durdurma isteğini sıkıştırma/yükleme parçası sınırında uygular; yerel geçici ZIP'leri ve yarım Dropbox staging klasörünü temizler.
 - **✉️ Brevo (Sendinblue) E-Posta Raporlama:**
