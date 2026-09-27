@@ -114,19 +114,20 @@ internal static class Program
             return 0;
         }
 
-        // 5. GUI & System Tray Mode
+        // 5. One-time enrollment / on-demand settings UI. Continuous work runs headless as a service.
         const string mutexName = "Global\\VdaHubServerController_Mutex";
         _singleInstanceMutex = new Mutex(true, mutexName, out bool createdNew);
         if (!createdNew)
         {
             MessageBox.Show(
-                "VDA Hub Server Controller zaten arka planda çalışıyor.\nLütfen ekranın sağ altındaki Sistem Tepsisi (Tray) simgesini kontrol edin.",
+                "VDA Hub Server Controller ayar penceresi zaten açık. Arka plan ajanı Windows servisi olarak çalışır.",
                 "Uygulama Çalışıyor", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return 0;
         }
 
         ApplicationConfiguration.Initialize();
 
+        var newlyEnrolled = false;
         if (!EnrollmentService.IsEnrolled(configService.Current))
         {
             using var enrollmentForm = new EnrollmentForm(new EnrollmentService(configService));
@@ -135,18 +136,39 @@ internal static class Program
                 _singleInstanceMutex.ReleaseMutex();
                 return 1;
             }
+            newlyEnrolled = true;
         }
 
-        // Start background worker loop for the GUI session
-        using var cts = new CancellationTokenSource();
-        _ = Task.Run(() => engine.StartLoopAsync(cts.Token));
+        var executable = Environment.ProcessPath ?? Application.ExecutablePath;
+        var (installed, installMessage) = WindowsServiceManager.InstallService(executable);
+        if (!installed)
+        {
+            MessageBox.Show(installMessage, "Servis kurulamadı", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            _singleInstanceMutex.ReleaseMutex();
+            return 1;
+        }
+        var (started, startMessage) = WindowsServiceManager.StartService();
+        if (!started)
+        {
+            MessageBox.Show(startMessage, "Servis başlatılamadı", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            _singleInstanceMutex.ReleaseMutex();
+            return 1;
+        }
+
+        if (newlyEnrolled)
+        {
+            MessageBox.Show(
+                "Eşleştirme tamamlandı. Eski ajan servisi kaldırıldı ve yeni headless servis başlatıldı.\n\nAjan taskbar veya sistem tepsisinde ikon göstermeden arka planda çalışacak.",
+                "VDA Hub ajanı hazır",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            _singleInstanceMutex.ReleaseMutex();
+            return 0;
+        }
 
         var mainForm = new MainForm(configService, engine, brevoService, hubClient, backupService);
-
-        // Run UI message loop
         Application.Run(mainForm);
 
-        cts.Cancel();
         _singleInstanceMutex.ReleaseMutex();
         return 0;
     }
@@ -161,7 +183,7 @@ Kullanım:
   VdaHubServerController.exe [seçenek]
 
 Seçenekler:
-  (parametre yok)     : Grafik Arayüzü (Dashboard & System Tray) modunda başlatır.
+  (parametre yok)     : İlk kurulumda eşleştirir; sonrasında geçici ayar ekranını açar.
   --service           : Headless Windows Service modunda çalıştırır.
   --install-service   : Uygulamayı Windows Servisi olarak kurar (Otomatik başlatma).
   --uninstall-service : Kurulu Windows Servisini sistemden kaldırır.
@@ -170,7 +192,7 @@ Seçenekler:
   --run-once          : Diskleri tek sefer tarar, raporu üretir ve çıkar.
   --test-mail         : Brevo API ile yapılandırılan adrese test e-postası yollar.
   --test-hub          : VDA Hub API uç noktasına test raporu gönderir.
-  --backup-now        : Dropbox klasör yedeklemesini zaman beklemeden çalıştırır.
+  --backup-now        : Hub'da bekleyen manuel Dropbox snapshot komutunu çalıştırır.
   --help, -h          : Bu yardım menüsünü görüntüler.
 
 İlk kurulum:

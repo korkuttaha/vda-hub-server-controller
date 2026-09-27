@@ -1,6 +1,6 @@
 # VDA Hub Server Controller
 
-**VDA Hub Server Controller**, Windows sunucularındaki mantıksal disk bölümlerini (C:, D: vb.) ve fiziksel diskleri (HDD/SSD/NVMe) gerçek zamanlı izleyen, SMART sağlık durumlarını denetleyen, merkezi **VDA Hub** paneline veri aktaran ve **Brevo (Sendinblue)** altyapısıyla günlük durum e-postaları ile anlık kritik alarmlar gönderen hafif, bağımsız (self-contained) bir sunucu ajanıdır (Agent).
+**VDA Hub Server Controller**, Windows sunucularındaki disk/CPU/RAM durumunu merkezi **VDA Hub** paneline aktaran ve Hub'dan manuel tetiklenen tam Dropbox snapshot yedeklerini çalıştıran self-contained Windows ajanıdır.
 
 ---
 
@@ -9,14 +9,15 @@
 - **📁 Ayrıntılı Disk & Kapasite Takibi:** Mantıksal sürücülerin toplam boyutu, boş alanı, kullanılan alanı, doluluk yüzdesi ve dosya sistemi (NTFS, ReFS vb.).
 - **💽 Fiziksel Disk & SMART Sağlık Denetimi:** WMI üzerinden fiziksel disk modeli, seri numarası, arayüz türü (NVMe/SCSI/SATA), disk türü ve SMART arıza tahmini.
 - **🌐 VDA Hub Entegrasyonu:** Merkezi Hub API'sine (`POST /api/v1/servers/report`) JSON formatında periyodik durum aktarımı (Bearer Token / X-API-Key destekli).
+- **🔑 Generic EXE eşleştirmesi:** Aynı EXE bütün sunucularda kullanılır; ilk açılışta Hub'ın tek kullanımlık Kurulum Anahtarı girilir.
+- **☁️ Manuel tam Dropbox snapshot:** Yalnız Hub'daki **YEDEKLE** komutuyla seçili klasörlerin bütün dosyalarını `VDAKor Hub/VDA Backups/Sunucu/Tarih` altına yükler. Zamanlama ve otomatik silme yoktur.
 - **✉️ Brevo (Sendinblue) E-Posta Raporlama:**
   - **Günlük Durum Bülteni:** Her sabah belirlenen saatte (örn. `09:00`) sunucunun tüm disk durumunu renkli ilerleme çubukları ve sağlık rozetleri içeren modern HTML formatında e-posta olarak iletir.
   - **Kritik Eşik Alarmı:** Disk doluluğu kritik seviyeyi (örn. `%90`) aştığında veya SMART arıza uyarısı alındığında anında acil durum uyarısı gönderir.
   - **Aç/Kapat (Toggle) Opsiyonu:** Brevo e-posta gönderimi arayüzden veya konfigürasyondan tek tıkla açılıp kapatılabilir.
-- **🛡️ Hibrit Çalışma Modelleri:**
-  1. **Grafik Arayüz & Sistem Tepsisi (System Tray):** Görev çubuğunda simge olarak çalışır, tıklandığında modern kontrol paneli açılır.
-  2. **Headless Windows Servisi:** Kullanıcı oturumu açık olmasa bile sunucu başladığında 7/24 sessizce arka planda çalışır (`sc create`).
-  3. **CLI (Komut Satırı):** Terminal üzerinden test ve yönetim desteği.
+- **🛡️ Headless çalışma:** İlk eşleştirme veya elle ayar açılışı dışında sürekli GUI yoktur. Ajan taskbar/system-tray ikonu göstermeyen otomatik Windows servisi olarak çalışır.
+- **♻️ Güvenli servis geçişi:** Aynı adlı doğrulanmış eski VDAKor servisini durdurur, kaldırır ve yeni EXE ile yeniden oluşturur; yabancı servis görülürse işlem yapmaz.
+- **⌨️ CLI:** Terminal üzerinden test ve yönetim desteği.
 - **📦 Tek Bağımsız Dosya (.exe):** Sunucuda .NET veya ek hiçbir runtime kurulu olmasına gerek yoktur. Tek bir `.exe` dosyası olarak çalıştırılabilir.
 
 ---
@@ -26,7 +27,7 @@
 ```mermaid
 flowchart TD
     subgraph Sunucu ["Sunucu (Windows Server)"]
-        Agent["VdaHubServerController.exe\n(Servis veya Tray Modu)"]
+        Agent["VdaHubServerController.exe\n(Headless Windows Service)"]
         WMI["Disk & SMART Monitör\n(DriveInfo + WMI Win32_DiskDrive)"]
         Config["config.json\n(Sunucu Ayarları & Key'ler)"]
         
@@ -52,17 +53,14 @@ flowchart TD
 
 ## 🛠️ Kurulum ve Çalıştırma
 
-### 1. Hazır .exe ile Çalıştırma
-Projeyi derlediğinizde oluşturulan `VdaHubServerController.exe` dosyasını sunucunuzda istediğiniz bir klasöre (örn. `C:\VdaHubController\`) kopyalayın:
+### 1. Generic EXE ile eşleştirme
 
-- **Arayüz ile Başlatmak İçin:** `VdaHubServerController.exe` dosyasına çift tıklayın.
-- **Windows Servisi Olarak Kurmak İçin:**
-  - Uygulama arayüzündeki **Windows Servis Modu** sekmesinden **"Servisi Kur"** butonuna basın.
-  - VEYA Yönetici Terminalinden:
-    ```cmd
-    VdaHubServerController.exe --install-service
-    VdaHubServerController.exe --start-service
-    ```
+1. Hub > **Sunucular** ekranında Windows sunucu kaydını açıp tek kullanımlık Kurulum Anahtarını alın.
+2. `VdaHubServerController.exe` dosyasını yönetici olarak açın.
+3. Hub adresini ve Kurulum Anahtarını girin.
+4. Eşleştirmeden sonra EXE kendisini `%ProgramData%\VDAKor\ServerAgent` altında otomatik Windows servisi olarak kurar ve kapanır.
+
+Servis kullanıcı oturumu olmasa da çalışır; taskbar veya sistem tepsisinde ikon göstermez. EXE sonradan çift tıklanırsa geçici ayar ekranı açılır; pencere kapandığında yalnız ayar uygulaması kapanır, servis devam eder.
 
 ---
 
@@ -113,7 +111,7 @@ Uygulama ilk çalıştığında otomatik olarak `config.json` dosyasını oluşt
 
 | Parametre | Açıklama |
 |---|---|
-| `(parametre yok)` | Grafik kontrol panelini (GUI) ve Sistem Tepsisi (Tray) simgesini açar. |
+| `(parametre yok)` | İlk çalıştırmada eşleştirir; sonrasında geçici ayar penceresini açar. |
 | `--service` | Headless Windows Servisi modunda çalışır. |
 | `--install-service` | Uygulamayı Windows Servisi olarak kaydeder (Otomatik başlatma). |
 | `--uninstall-service`| Kurulu servisi sistemden kaldırır. |
@@ -122,6 +120,7 @@ Uygulama ilk çalıştığında otomatik olarak `config.json` dosyasını oluşt
 | `--run-once` | Diskleri anlık olarak tarar, konsola özet yazar ve çıkar. |
 | `--test-mail` | Brevo API üzerinden test e-postası gönderir. |
 | `--test-hub` | VDA Hub uç noktasına test raporu gönderir. |
+| `--backup-now` | Hub'da bekleyen manuel snapshot komutunu çalıştırır. |
 | `--help`, `-h` | Komut satırı yardım menüsünü görüntüler. |
 
 ---

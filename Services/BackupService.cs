@@ -7,14 +7,23 @@ using VdaHubServerController.Models;
 
 namespace VdaHubServerController.Services;
 
+public sealed class ManualBackupRequest
+{
+    public string RequestId { get; set; } = string.Empty;
+    public DateTime RequestedAtUtc { get; set; }
+    public string SnapshotFolder { get; set; } = string.Empty;
+    public string State { get; set; } = string.Empty;
+}
+
 public sealed class BackupPlanResponse
 {
     public bool Configured { get; set; }
     public bool Enabled { get; set; }
     public bool Ready { get; set; }
+    public bool ManualOnly { get; set; }
     public string? Message { get; set; }
     public List<string> Paths { get; set; } = [];
-    public int RunHourLocal { get; set; } = 2;
+    public ManualBackupRequest? ManualRequest { get; set; }
     public string? DestinationRoot { get; set; }
     public int ChunkSizeBytes { get; set; } = 8 * 1024 * 1024;
     public int MassChangeFileThreshold { get; set; } = 500;
@@ -35,6 +44,7 @@ public sealed record BackupExecutionResult(
 
 public sealed class BackupService
 {
+    private const string BackupProtocol = "2";
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(10) };
     private readonly ConfigService _config;
     private readonly string _statePath;
@@ -42,7 +52,11 @@ public sealed class BackupService
 
     private sealed class State
     {
-        public string? LastSuccessfulRunDateLocal { get; set; }
+        public string? LastCompletedRequestId { get; set; }
+        public string? LastCompletedSnapshotPath { get; set; }
+        public int LastFilesScanned { get; set; }
+        public int LastFilesUploaded { get; set; }
+        public long LastBytesUploaded { get; set; }
         public List<StateFile> Files { get; set; } = [];
     }
 
@@ -51,21 +65,11 @@ public sealed class BackupService
         public string Path { get; set; } = string.Empty;
         public long Length { get; set; }
         public long LastWriteUtcTicks { get; set; }
-        public string DropboxPath { get; set; } = string.Empty;
         public bool Deleted { get; set; }
     }
 
-    private sealed record CurrentFile(
-        FileInfo File,
-        string RootLabel,
-        string Relative,
-        string RemotePath);
-
-    private sealed record Change(
-        string Path,
-        CurrentFile Item,
-        StateFile? Previous,
-        string Kind);
+    private sealed record CurrentFile(FileInfo File, string RootLabel, string Relative);
+    private sealed record Change(string Path, CurrentFile Item, StateFile? Previous, string Kind);
 
     public BackupService(ConfigService config)
     {
@@ -92,7 +96,6 @@ public sealed class BackupService
     public async Task<(bool Success, string Message)> SavePlanAsync(
         bool enabled,
         IReadOnlyList<string> paths,
-        int runHourLocal,
         CancellationToken ct = default)
     {
         var settings = _config.Current.Hub;
@@ -103,8 +106,7 @@ public sealed class BackupService
         {
             serverId = _config.Current.ServerId,
             enabled,
-            paths,
-            runHourLocal
+            paths
         }, JsonOptions());
 
         using var request = Authorized(
@@ -115,11 +117,14 @@ public sealed class BackupService
         using var response = await Http.SendAsync(request, ct);
         var body = await response.Content.ReadAsStringAsync(ct);
         return response.IsSuccessStatusCode
-            ? (true, "Yedekleme planı Hub'a kaydedildi.")
+            ? (true, "Manuel yedekleme klasörleri Hub'a kaydedildi.")
             : (false, $"Hub yedekleme ayarı reddedildi (HTTP {(int)response.StatusCode}): {body}");
     }
 
-    public async Task<BackupExecutionResult> RunIfDueAsync(bool force = false, CancellationToken ct = default)
+    public Task<BackupExecutionResult> RunIfDueAsync(bool force = false, CancellationToken ct = default) =>
+        RunPendingAsync(ct);
+
+    public async Task<BackupExecutionResult> RunPendingAsync(CancellationToken ct = default)
     {
         if (!await _gate.WaitAsync(0, ct))
             return new(false, true, "Yedekleme zaten çalışıyor.");
@@ -128,36 +133,45 @@ public sealed class BackupService
         {
             var plan = await GetPlanAsync(ct);
             if (plan is null) return new(false, false, "Hub yedekleme planı alınamadı.");
-            if (!plan.Enabled) return new(false, true, "Yedekleme kapalı.");
-            if (!plan.Ready) return new(false, false, plan.Message ?? "Yedekleme planı hazır değil.");
-            if (string.IsNullOrWhiteSpace(plan.DestinationRoot))
-                return new(false, false, "Dropbox hedefi eksik.");
+            var command = plan.ManualRequest;
+            if (command is null) return new(false, true, "Bekleyen manuel yedekleme komutu yok.");
+            if (string.IsNullOrWhiteSpace(command.RequestId) || string.IsNullOrWhiteSpace(command.SnapshotFolder))
+                return new(false, false, "Hub geçersiz yedekleme komutu döndürdü.");
 
             var state = LoadState();
-            var today = DateTime.Now.ToString("yyyy-MM-dd");
-            if (!force)
+            if (state.LastCompletedRequestId == command.RequestId && !string.IsNullOrWhiteSpace(state.LastCompletedSnapshotPath))
             {
-                if (DateTime.Now.Hour < plan.RunHourLocal) return new(false, true, "Yedekleme saati henüz gelmedi.");
-                if (state.LastSuccessfulRunDateLocal == today) return new(false, true, "Bugünün yedeklemesi tamamlanmış.");
+                await ReportAsync(command.RequestId, true, state.LastFilesScanned, state.LastFilesUploaded,
+                    state.LastBytesUploaded, state.LastCompletedSnapshotPath, null, ct: ct);
+                return new(false, true, "Tamamlanan snapshot sonucu Hub'a yeniden bildirildi.",
+                    state.LastFilesScanned, state.LastFilesUploaded, state.LastBytesUploaded);
             }
+
+            if (!await StartRequestAsync(command.RequestId, ct))
+                return new(false, false, "Hub yedekleme komutu artık geçerli değil.");
+
+            if (!plan.Enabled)
+                return await FailAsync(command.RequestId, "Yedekleme klasörleri etkin değil.", ct);
+            if (!plan.Ready)
+                return await FailAsync(command.RequestId, plan.Message ?? "Yedekleme planı hazır değil.", ct);
+            if (string.IsNullOrWhiteSpace(plan.DestinationRoot))
+                return await FailAsync(command.RequestId, "Dropbox hedefi eksik.", ct);
 
             var manifest = state.Files
                 .Where(x => !string.IsNullOrWhiteSpace(x.Path))
                 .GroupBy(x => x.Path, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(x => x.Key, x => x.Last(), StringComparer.OrdinalIgnoreCase);
-
             var scan = Scan(plan);
             if (scan.Errors.Count > 0)
             {
                 var error = string.Join(" | ", scan.Errors.Take(8));
-                await ReportAsync(false, scan.Files.Count, 0, 0, error, ct: ct);
+                await ReportAsync(command.RequestId, false, scan.Files.Count, 0, 0, null, error, ct: ct);
                 return new(true, false, error, scan.Files.Count);
             }
 
             var changes = new List<Change>();
             var descriptors = new List<string>();
             var missing = new Dictionary<string, StateFile>(StringComparer.OrdinalIgnoreCase);
-
             foreach (var pair in manifest)
             {
                 if (!scan.Files.ContainsKey(pair.Key) && !pair.Value.Deleted)
@@ -166,21 +180,18 @@ public sealed class BackupService
                     descriptors.Add("D|" + pair.Key);
                 }
             }
-
             foreach (var pair in scan.Files)
             {
                 manifest.TryGetValue(pair.Key, out var previous);
                 var kind = "N";
                 var changed = previous is null;
                 if (previous is not null &&
-                    (previous.Deleted ||
-                     previous.Length != pair.Value.File.Length ||
+                    (previous.Deleted || previous.Length != pair.Value.File.Length ||
                      previous.LastWriteUtcTicks != pair.Value.File.LastWriteTimeUtc.Ticks))
                 {
                     kind = "M";
                     changed = true;
                 }
-
                 if (!changed) continue;
                 changes.Add(new(pair.Key, pair.Value, previous, kind));
                 descriptors.Add($"{kind}|{pair.Key}|{pair.Value.File.Length}|{pair.Value.File.LastWriteTimeUtc.Ticks}");
@@ -207,54 +218,36 @@ public sealed class BackupService
                  renameLike >= plan.RenameLikeThreshold);
             var approved = !string.IsNullOrWhiteSpace(fingerprint) &&
                 string.Equals(plan.ApprovedAnomalyFingerprint, fingerprint, StringComparison.OrdinalIgnoreCase);
-
             if (massChange && !approved)
             {
-                var message = $"Olası ransomware/toplu değişiklik: {changedFiles} dosya (%{changedPercent:0.##}), şüpheli yeniden adlandırma: {renameLike}. Dropbox'a hiçbir dosya yazılmadı.";
-                await ReportAsync(false, scan.Files.Count, 0, 0, message, true, fingerprint, changedFiles, changedPercent, renameLike, ct);
+                var message = $"Olası ransomware/toplu değişiklik: {changedFiles} dosya (%{changedPercent:0.##}), şüpheli yeniden adlandırma: {renameLike}. Yeni snapshot oluşturulmadı.";
+                await ReportAsync(command.RequestId, false, scan.Files.Count, 0, 0, null, message,
+                    true, fingerprint, changedFiles, changedPercent, renameLike, ct);
                 return new(true, false, message, scan.Files.Count, RequiresApproval: true);
             }
 
-            var accessToken = await GetAccessTokenAsync(ct);
+            var accessToken = await GetAccessTokenAsync(command.RequestId, ct);
             if (string.IsNullOrWhiteSpace(accessToken))
-            {
-                const string tokenError = "Dropbox yükleme yetkisi alınamadı.";
-                await ReportAsync(false, scan.Files.Count, 0, 0, tokenError, ct: ct);
-                return new(true, false, tokenError, scan.Files.Count);
-            }
+                return await FailAsync(command.RequestId, "Dropbox yükleme yetkisi alınamadı.", ct, scan.Files.Count);
 
+            var stagingRoot = $"{plan.DestinationRoot!.TrimEnd('/')}/.uploading/{command.RequestId}";
+            var finalRoot = $"{plan.DestinationRoot.TrimEnd('/')}/{command.SnapshotFolder}";
             var folders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var errors = new List<string>();
             var filesUploaded = 0;
             long bytesUploaded = 0;
-            var versionRun = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff");
             var chunkSize = Math.Clamp(plan.ChunkSizeBytes, 1024 * 1024, 64 * 1024 * 1024);
+            await EnsureFolderPathAsync(stagingRoot, accessToken, folders, ct);
 
-            foreach (var change in changes)
+            foreach (var item in scan.Files.Values.OrderBy(x => x.File.FullName, StringComparer.OrdinalIgnoreCase))
             {
                 try
                 {
-                    var remoteDirectory = change.Item.RemotePath[..change.Item.RemotePath.LastIndexOf('/')];
-                    await EnsureFolderPathAsync(remoteDirectory, accessToken, folders, ct);
-
-                    if (change.Previous is not null && !string.IsNullOrWhiteSpace(change.Previous.DropboxPath))
-                    {
-                        var versionPath =
-                            $"{plan.DestinationRoot!.TrimEnd('/')}/Versions/{versionRun}/{change.Item.RootLabel}/{change.Item.Relative}";
-                        await CopyVersionAsync(change.Previous.DropboxPath, versionPath, accessToken, folders, ct);
-                    }
-
-                    await UploadAsync(change.Item.File, change.Item.RemotePath, accessToken, chunkSize, ct);
-                    manifest[change.Path] = new StateFile
-                    {
-                        Path = change.Path,
-                        Length = change.Item.File.Length,
-                        LastWriteUtcTicks = change.Item.File.LastWriteTimeUtc.Ticks,
-                        DropboxPath = change.Item.RemotePath,
-                        Deleted = false
-                    };
+                    var remotePath = $"{stagingRoot}/{item.RootLabel}/{item.Relative}";
+                    await EnsureFolderPathAsync(remotePath[..remotePath.LastIndexOf('/')], accessToken, folders, ct);
+                    await UploadAsync(item.File, remotePath, accessToken, chunkSize, ct);
                     filesUploaded++;
-                    bytesUploaded += change.Item.File.Length;
+                    bytesUploaded += item.File.Length;
                 }
                 catch (Exception ex)
                 {
@@ -262,29 +255,58 @@ public sealed class BackupService
                 }
             }
 
-            foreach (var pair in missing)
+            if (errors.Count > 0)
             {
-                pair.Value.Deleted = true;
-                manifest[pair.Key] = pair.Value;
+                var errorText = string.Join(" | ", errors.Take(8));
+                await ReportAsync(command.RequestId, false, scan.Files.Count, filesUploaded, bytesUploaded, null,
+                    errorText, false, null, changedFiles, changedPercent, renameLike, ct);
+                return new(true, false, errorText, scan.Files.Count, filesUploaded, bytesUploaded);
             }
 
-            var success = errors.Count == 0;
-            if (success) state.LastSuccessfulRunDateLocal = today;
-            state.Files = manifest.Values.OrderBy(x => x.Path, StringComparer.OrdinalIgnoreCase).ToList();
+            try
+            {
+                await MoveSnapshotAsync(stagingRoot, finalRoot, accessToken, ct);
+            }
+            catch (Exception ex)
+            {
+                await ReportAsync(command.RequestId, false, scan.Files.Count, filesUploaded, bytesUploaded,
+                    null, ex.Message, false, null, changedFiles, changedPercent, renameLike, ct);
+                return new(true, false, ex.Message, scan.Files.Count, filesUploaded, bytesUploaded);
+            }
+            state.Files = scan.Files.Select(pair => new StateFile
+            {
+                Path = pair.Key,
+                Length = pair.Value.File.Length,
+                LastWriteUtcTicks = pair.Value.File.LastWriteTimeUtc.Ticks,
+                Deleted = false
+            }).OrderBy(x => x.Path, StringComparer.OrdinalIgnoreCase).ToList();
+            state.LastCompletedRequestId = command.RequestId;
+            state.LastCompletedSnapshotPath = finalRoot;
+            state.LastFilesScanned = scan.Files.Count;
+            state.LastFilesUploaded = filesUploaded;
+            state.LastBytesUploaded = bytesUploaded;
             SaveState(state);
 
-            var errorText = success ? null : string.Join(" | ", errors.Take(8));
-            await ReportAsync(success, scan.Files.Count, filesUploaded, bytesUploaded, errorText,
-                false, null, changedFiles, changedPercent, renameLike, ct);
-
-            return new(true, success,
-                success ? $"Yedek tamamlandı: {filesUploaded}/{scan.Files.Count} dosya, {FormatBytes(bytesUploaded)}." : errorText!,
+            await ReportAsync(command.RequestId, true, scan.Files.Count, filesUploaded, bytesUploaded,
+                finalRoot, null, false, null, changedFiles, changedPercent, renameLike, ct);
+            return new(true, true,
+                $"Tarih damgalı snapshot tamamlandı: {filesUploaded}/{scan.Files.Count} dosya, {FormatBytes(bytesUploaded)}.",
                 scan.Files.Count, filesUploaded, bytesUploaded);
         }
         finally
         {
             _gate.Release();
         }
+    }
+
+    private async Task<BackupExecutionResult> FailAsync(
+        string requestId,
+        string message,
+        CancellationToken ct,
+        int filesScanned = 0)
+    {
+        await ReportAsync(requestId, false, filesScanned, 0, 0, null, message, ct: ct);
+        return new(true, false, message, filesScanned);
     }
 
     private (Dictionary<string, CurrentFile> Files, List<string> Errors) Scan(BackupPlanResponse plan)
@@ -300,8 +322,7 @@ public sealed class BackupService
                 foreach (var file in EnumerateFilesSafe(root))
                 {
                     var relative = Path.GetRelativePath(root, file.FullName).Replace('\\', '/');
-                    var remote = $"{plan.DestinationRoot!.TrimEnd('/')}/Current/{rootLabel}/{relative}";
-                    files[file.FullName] = new(file, rootLabel, relative, remote);
+                    files[file.FullName] = new(file, rootLabel, relative);
                 }
             }
             catch (Exception ex)
@@ -360,13 +381,24 @@ public sealed class BackupService
         return $"{drive}-{safe}-{hash}";
     }
 
-    private async Task<string?> GetAccessTokenAsync(CancellationToken ct)
+    private async Task<bool> StartRequestAsync(string requestId, CancellationToken ct)
+    {
+        var settings = _config.Current.Hub;
+        if (!TryBridgeBase(settings, out var baseUri)) return false;
+        var payload = JsonSerializer.Serialize(new { serverId = _config.Current.ServerId, requestId }, JsonOptions());
+        using var request = Authorized(HttpMethod.Post, new Uri(baseUri, "/api/server-controller/bridge/backup-start"), settings.ApiKey);
+        request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+        using var response = await Http.SendAsync(request, ct);
+        return response.IsSuccessStatusCode;
+    }
+
+    private async Task<string?> GetAccessTokenAsync(string requestId, CancellationToken ct)
     {
         var settings = _config.Current.Hub;
         if (!TryBridgeBase(settings, out var baseUri)) return null;
         using var request = Authorized(
             HttpMethod.Get,
-            new Uri(baseUri, $"/api/server-controller/bridge/backup-token?serverId={Uri.EscapeDataString(_config.Current.ServerId)}"),
+            new Uri(baseUri, $"/api/server-controller/bridge/backup-token?serverId={Uri.EscapeDataString(_config.Current.ServerId)}&requestId={Uri.EscapeDataString(requestId)}"),
             settings.ApiKey);
         using var response = await Http.SendAsync(request, ct);
         if (!response.IsSuccessStatusCode) return null;
@@ -375,19 +407,31 @@ public sealed class BackupService
     }
 
     private async Task ReportAsync(
-        bool success, int filesScanned, int filesUploaded, long bytesUploaded, string? error,
-        bool requiresApproval = false, string? fingerprint = null, int changedFiles = 0,
-        double changedPercent = 0, int renameLikeChanges = 0, CancellationToken ct = default)
+        string requestId,
+        bool success,
+        int filesScanned,
+        int filesUploaded,
+        long bytesUploaded,
+        string? snapshotPath,
+        string? error,
+        bool requiresApproval = false,
+        string? fingerprint = null,
+        int changedFiles = 0,
+        double changedPercent = 0,
+        int renameLikeChanges = 0,
+        CancellationToken ct = default)
     {
         var settings = _config.Current.Hub;
         if (!TryBridgeBase(settings, out var baseUri)) return;
         var payload = JsonSerializer.Serialize(new
         {
             serverId = _config.Current.ServerId,
+            requestId,
             success,
             filesScanned,
             filesUploaded,
             bytesUploaded,
+            snapshotPath,
             error,
             requiresApproval,
             anomalyFingerprint = fingerprint,
@@ -401,7 +445,10 @@ public sealed class BackupService
     }
 
     private static async Task EnsureFolderPathAsync(
-        string folderPath, string accessToken, HashSet<string> cache, CancellationToken ct)
+        string folderPath,
+        string accessToken,
+        HashSet<string> cache,
+        CancellationToken ct)
     {
         var current = string.Empty;
         foreach (var segment in folderPath.Split('/', StringSplitOptions.RemoveEmptyEntries))
@@ -418,21 +465,27 @@ public sealed class BackupService
         }
     }
 
-    private static async Task CopyVersionAsync(
-        string source, string destination, string accessToken, HashSet<string> cache, CancellationToken ct)
+    private static async Task MoveSnapshotAsync(
+        string source,
+        string destination,
+        string accessToken,
+        CancellationToken ct)
     {
-        await EnsureFolderPathAsync(destination[..destination.LastIndexOf('/')], accessToken, cache, ct);
         using var response = await DropboxJsonAsync(
-            "https://api.dropboxapi.com/2/files/copy_v2",
+            "https://api.dropboxapi.com/2/files/move_v2",
             accessToken,
             new { from_path = source, to_path = destination, autorename = false, allow_ownership_transfer = false },
             ct);
         if (!response.IsSuccessStatusCode)
-            throw new IOException($"Önceki sağlam Dropbox sürümü arşivlenemedi; üzerine yazılmadı: {source}");
+            throw new IOException($"Tamamlanan snapshot tarih klasörüne taşınamadı: {destination}");
     }
 
     private static async Task UploadAsync(
-        FileInfo file, string remotePath, string accessToken, int chunkSize, CancellationToken ct)
+        FileInfo file,
+        string remotePath,
+        string accessToken,
+        int chunkSize,
+        CancellationToken ct)
     {
         const long maxFile = 2_199_019_061_248L;
         if (file.Length > maxFile) throw new IOException($"Dosya Dropbox sınırını aşıyor: {file.FullName}");
@@ -443,7 +496,11 @@ public sealed class BackupService
         var first = await ReadChunkAsync(stream, buffer, ct);
         using var start = await DropboxContentAsync(
             "https://content.dropboxapi.com/2/files/upload_session/start",
-            accessToken, new { close = false }, buffer, first, ct);
+            accessToken,
+            new { close = false },
+            buffer,
+            first,
+            ct);
         if (!start.IsSuccessStatusCode) throw new IOException($"Dropbox oturumu başlatılamadı: {file.FullName}");
         using var startDoc = JsonDocument.Parse(await start.Content.ReadAsStringAsync(ct));
         var sessionId = startDoc.RootElement.GetProperty("session_id").GetString()
@@ -479,13 +536,17 @@ public sealed class BackupService
             };
             using var response = await DropboxContentAsync(
                 "https://content.dropboxapi.com/2/files/upload_session/finish",
-                accessToken, arg, [], 0, ct);
+                accessToken,
+                arg,
+                [],
+                0,
+                ct);
             if (!response.IsSuccessStatusCode) throw new IOException($"Dropbox yüklemesi tamamlanamadı: {file.FullName}");
         }
 
         file.Refresh();
         if (file.Length != initialLength || file.LastWriteTimeUtc.Ticks != initialTicks)
-            throw new IOException($"Dosya yedeklenirken değişti; sonraki turda yeniden denenecek: {file.FullName}");
+            throw new IOException($"Dosya yedeklenirken değişti; snapshot tamamlanmadı: {file.FullName}");
     }
 
     private static async Task<int> ReadChunkAsync(Stream stream, byte[] buffer, CancellationToken ct)
@@ -501,7 +562,10 @@ public sealed class BackupService
     }
 
     private static async Task<HttpResponseMessage> DropboxJsonAsync(
-        string url, string accessToken, object payload, CancellationToken ct)
+        string url,
+        string accessToken,
+        object payload,
+        CancellationToken ct)
     {
         var request = new HttpRequestMessage(HttpMethod.Post, url)
         {
@@ -512,7 +576,12 @@ public sealed class BackupService
     }
 
     private static async Task<HttpResponseMessage> DropboxContentAsync(
-        string url, string accessToken, object arg, byte[] buffer, int count, CancellationToken ct)
+        string url,
+        string accessToken,
+        object arg,
+        byte[] buffer,
+        int count,
+        CancellationToken ct)
     {
         var request = new HttpRequestMessage(HttpMethod.Post, url);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
@@ -524,12 +593,19 @@ public sealed class BackupService
 
     private State LoadState()
     {
+        if (!File.Exists(_statePath)) return new();
         try
         {
-            if (!File.Exists(_statePath)) return new();
-            return JsonSerializer.Deserialize<State>(File.ReadAllText(_statePath), JsonOptions()) ?? new();
+            var state = JsonSerializer.Deserialize<State>(File.ReadAllText(_statePath), JsonOptions())
+                ?? throw new InvalidDataException("Yerel yedekleme durumu boş.");
+            state.Files ??= [];
+            return state;
         }
-        catch { return new(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            throw new InvalidDataException(
+                "Yerel yedekleme durumu okunamadı; ransomware baseline'ını atlamamak için işlem durduruldu.", ex);
+        }
     }
 
     private void SaveState(State state)
@@ -565,6 +641,7 @@ public sealed class BackupService
     {
         var request = new HttpRequestMessage(method, uri);
         request.Headers.Add("X-API-Key", apiKey);
+        request.Headers.Add("X-VDA-Backup-Protocol", BackupProtocol);
         return request;
     }
 

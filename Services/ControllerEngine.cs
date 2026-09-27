@@ -58,15 +58,7 @@ public class ControllerEngine
             Log(hubSuccess ? $"✓ VDA Hub: {hubMsg}" : $"✗ VDA Hub Hatası: {hubMsg}");
         }
 
-        // 2. Dropbox klasör yedekleme
-        if (config.Hub.Enabled)
-        {
-            var backup = await _backupService.RunIfDueAsync(false, ct);
-            if (backup.Ran)
-                Log(backup.Success ? $"✓ Dropbox Yedek: {backup.Message}" : $"✗ Dropbox Yedek: {backup.Message}");
-        }
-
-        // 3. Brevo E-Posta İşlemleri
+        // 2. Brevo E-Posta İşlemleri
         if (config.Brevo.Enabled || forceEmail)
         {
             await HandleBrevoNotificationsAsync(config, report, forceEmail, ct);
@@ -143,6 +135,7 @@ public class ControllerEngine
     public async Task StartLoopAsync(CancellationToken ct)
     {
         Log("Arka plan izleme döngüsü başlatıldı.");
+        var backupLoop = RunBackupCommandLoopAsync(ct);
 
         // İlk döngüyü hemen çalıştır
         try
@@ -174,6 +167,33 @@ public class ControllerEngine
             }
         }
 
+        try { await backupLoop; } catch (TaskCanceledException) { }
         Log("Arka plan izleme döngüsü sonlandırıldı.");
+    }
+
+    private async Task RunBackupCommandLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                if (_configService.Current.Hub.Enabled)
+                {
+                    var backup = await _backupService.RunPendingAsync(ct);
+                    if (backup.Ran)
+                        Log(backup.Success ? $"✓ Dropbox Snapshot: {backup.Message}" : $"✗ Dropbox Snapshot: {backup.Message}");
+                }
+                await Task.Delay(TimeSpan.FromSeconds(15), ct);
+            }
+            catch (TaskCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Log($"Yedekleme komutu kontrol hatası: {ex.Message}");
+                await Task.Delay(TimeSpan.FromSeconds(15), ct);
+            }
+        }
     }
 }

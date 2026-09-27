@@ -113,7 +113,7 @@ public sealed class EnrollmentForm : Form
             if (!success) return;
 
             MessageBox.Show(
-                message + "\n\nKalıcı API anahtarı arka planda kaydedildi. Artık normal ajan ekranına geçebilirsiniz.",
+                message + "\n\nKalıcı API anahtarı güvenli konuma kaydedildi. Eski ajan servisi kaldırılıp yeni headless servis kurulacak; taskbar veya tray ikonu açık kalmayacak.",
                 "Eşleştirme tamamlandı",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
