@@ -339,8 +339,8 @@ public class MainForm : Form
         var lblHubUrl = new Label { Text = "Hub API URL:", Location = new Point(20, 60), AutoSize = true, Font = new Font("Segoe UI", 9.0f) };
         _txtHubUrl = new TextBox { Location = new Point(160, 57), Size = new Size(450, 24), Font = new Font("Segoe UI", 9.0f) };
 
-        var lblHubKey = new Label { Text = "API Key / Token:", Location = new Point(20, 95), AutoSize = true, Font = new Font("Segoe UI", 9.0f) };
-        _txtHubApiKey = new TextBox { Location = new Point(160, 92), Size = new Size(450, 24), Font = new Font("Segoe UI", 9.0f), UseSystemPasswordChar = true };
+        var lblHubKey = new Label { Text = "Sunucu API Anahtarı:", Location = new Point(20, 95), AutoSize = true, Font = new Font("Segoe UI", 9.0f) };
+        _txtHubApiKey = new TextBox { Location = new Point(160, 92), Size = new Size(450, 24), Font = new Font("Segoe UI", 9.0f), UseSystemPasswordChar = true, ReadOnly = true };
 
         _btnTestHub = new Button
         {
