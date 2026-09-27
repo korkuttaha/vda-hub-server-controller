@@ -12,6 +12,7 @@ public class MainForm : Form
     private readonly ControllerEngine _engine;
     private readonly BrevoEmailService _brevoService;
     private readonly HubClientService _hubClient;
+    private readonly BackupService _backupService;
 
     // Tray & Form controls
     private NotifyIcon _trayIcon = null!;
@@ -48,6 +49,16 @@ public class MainForm : Form
     private Button _btnTestBrevo = null!;
     private Button _btnTestHub = null!;
 
+    // Backup controls
+    private CheckBox _chkBackupEnabled = null!;
+    private ListBox _lstBackupFolders = null!;
+    private NumericUpDown _numBackupHour = null!;
+    private Label _lblBackupStatus = null!;
+    private Button _btnBackupAddFolder = null!;
+    private Button _btnBackupRemoveFolder = null!;
+    private Button _btnBackupSave = null!;
+    private Button _btnBackupRunNow = null!;
+
     // Service controls
     private Label _lblServiceStatus = null!;
     private Button _btnInstallService = null!;
@@ -62,17 +73,20 @@ public class MainForm : Form
         ConfigService configService,
         ControllerEngine engine,
         BrevoEmailService brevoService,
-        HubClientService hubClient)
+        HubClientService hubClient,
+        BackupService backupService)
     {
         _configService = configService;
         _engine = engine;
         _brevoService = brevoService;
         _hubClient = hubClient;
+        _backupService = backupService;
 
         InitializeComponent();
         SetupEvents();
         LoadSettingsIntoUI();
         RefreshServiceStatus();
+        this.Shown += async (_, _) => await LoadBackupPlanAsync();
     }
 
     private void InitializeComponent()
@@ -184,13 +198,16 @@ public class MainForm : Form
         var tabDashboard = CreateDashboardTab();
         // Tab 2: Settings
         var tabSettings = CreateSettingsTab();
-        // Tab 3: Windows Service
+        // Tab 3: Dropbox Backup
+        var tabBackup = CreateBackupTab();
+        // Tab 4: Windows Service
         var tabService = CreateServiceTab();
-        // Tab 4: Logs
+        // Tab 5: Logs
         var tabLogs = CreateLogsTab();
 
         _tabControl.TabPages.Add(tabDashboard);
         _tabControl.TabPages.Add(tabSettings);
+        _tabControl.TabPages.Add(tabBackup);
         _tabControl.TabPages.Add(tabService);
         _tabControl.TabPages.Add(tabLogs);
 
@@ -416,6 +433,124 @@ public class MainForm : Form
         return tab;
     }
 
+    private TabPage CreateBackupTab()
+    {
+        var tab = new TabPage("☁️ Yedekleme");
+        tab.Padding = new Padding(20);
+        tab.BackColor = Color.White;
+
+        var title = new Label
+        {
+            Text = "Dropbox Klasör Yedekleme",
+            Font = new Font("Segoe UI", 12.0f, FontStyle.Bold),
+            ForeColor = Color.FromArgb(15, 23, 42),
+            Location = new Point(20, 18),
+            AutoSize = true
+        };
+        var description = new Label
+        {
+            Text = "Bu sunucuda yedeklenecek klasörleri Windows klasör seçicisiyle belirleyin. Dosyalar Hub üzerinden geçmeden doğrudan Dropbox'a gider. Toplu şüpheli değişiklikte aktarım otomatik durur.",
+            Location = new Point(20, 50),
+            Size = new Size(790, 45),
+            ForeColor = Color.FromArgb(71, 85, 105)
+        };
+
+        _chkBackupEnabled = new CheckBox
+        {
+            Text = "Bu sunucunun Dropbox klasör yedeklemesini aç",
+            Location = new Point(20, 105),
+            AutoSize = true,
+            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
+        };
+
+        var hourLabel = new Label { Text = "Günlük çalışma saati:", Location = new Point(480, 107), AutoSize = true };
+        _numBackupHour = new NumericUpDown
+        {
+            Location = new Point(620, 104),
+            Size = new Size(65, 25),
+            Minimum = 0,
+            Maximum = 23,
+            Value = 2
+        };
+
+        _lstBackupFolders = new ListBox
+        {
+            Location = new Point(20, 145),
+            Size = new Size(660, 235),
+            HorizontalScrollbar = true,
+            Font = new Font("Consolas", 9.5f)
+        };
+
+        _btnBackupAddFolder = new Button
+        {
+            Text = "➕ Klasör Ekle",
+            Location = new Point(695, 145),
+            Size = new Size(125, 38),
+            BackColor = Color.FromArgb(37, 99, 235),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        _btnBackupAddFolder.Click += (_, _) => AddBackupFolder();
+
+        _btnBackupRemoveFolder = new Button
+        {
+            Text = "Kaldır",
+            Location = new Point(695, 192),
+            Size = new Size(125, 35),
+            FlatStyle = FlatStyle.Flat
+        };
+        _btnBackupRemoveFolder.Click += (_, _) =>
+        {
+            if (_lstBackupFolders.SelectedIndex >= 0) _lstBackupFolders.Items.RemoveAt(_lstBackupFolders.SelectedIndex);
+        };
+
+        _lblBackupStatus = new Label
+        {
+            Text = "Hub yedekleme planı kontrol ediliyor...",
+            Location = new Point(20, 395),
+            Size = new Size(800, 45),
+            ForeColor = Color.FromArgb(71, 85, 105)
+        };
+
+        _btnBackupSave = new Button
+        {
+            Text = "💾 Yedekleme Ayarını Kaydet",
+            Location = new Point(20, 455),
+            Size = new Size(235, 42),
+            BackColor = Color.FromArgb(16, 185, 129),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        _btnBackupSave.Click += async (_, _) => await SaveBackupPlanAsync();
+
+        _btnBackupRunNow = new Button
+        {
+            Text = "▶ Şimdi Yedekle",
+            Location = new Point(270, 455),
+            Size = new Size(180, 42),
+            BackColor = Color.FromArgb(79, 70, 229),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        _btnBackupRunNow.Click += async (_, _) => await RunBackupNowAsync();
+
+        var safety = new Label
+        {
+            Text = "Koruma: 500+ dosya, en az 100 dosyalık sette %15+ değişiklik veya 100+ şüpheli yeniden adlandırma görülürse yedekleme başlamadan durur. Kaynak silme Dropbox kopyasını silmez.",
+            Location = new Point(20, 520),
+            Size = new Size(790, 50),
+            ForeColor = Color.FromArgb(146, 64, 14)
+        };
+
+        tab.Controls.AddRange(new Control[]
+        {
+            title, description, _chkBackupEnabled, hourLabel, _numBackupHour,
+            _lstBackupFolders, _btnBackupAddFolder, _btnBackupRemoveFolder,
+            _lblBackupStatus, _btnBackupSave, _btnBackupRunNow, safety
+        });
+        return tab;
+    }
+
     private TabPage CreateServiceTab()
     {
         var tab = new TabPage("🛡️ Windows Servis Modu");
@@ -599,6 +734,84 @@ public class MainForm : Form
                 UpdateDashboard(report);
             }
         };
+    }
+
+    private async Task LoadBackupPlanAsync()
+    {
+        try
+        {
+            var plan = await _backupService.GetPlanAsync();
+            _lstBackupFolders.Items.Clear();
+            if (plan is null)
+            {
+                _lblBackupStatus.Text = "Hub yedekleme planı okunamadı. Hub URL/API anahtarını kontrol edin.";
+                return;
+            }
+
+            foreach (var path in plan.Paths) _lstBackupFolders.Items.Add(path);
+            _chkBackupEnabled.Checked = plan.Enabled;
+            _numBackupHour.Value = Math.Clamp(plan.RunHourLocal, 0, 23);
+            _lblBackupStatus.Text = plan.Configured
+                ? (plan.Ready ? "Hazır · Dropbox bağlantısı ve sunucu planı aktif." : plan.Message ?? "Plan kayıtlı; yedekleme şu an hazır değil.")
+                : "Önce Hub / Sunucular ekranından bu sunucu için yeni kurulum paketi üretin.";
+        }
+        catch (Exception ex)
+        {
+            _lblBackupStatus.Text = "Yedekleme planı alınamadı: " + ex.Message;
+        }
+    }
+
+    private void AddBackupFolder()
+    {
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = "Dropbox'a yedeklenecek klasörü seçin",
+            ShowNewFolderButton = false,
+            UseDescriptionForTitle = true
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(dialog.SelectedPath)) return;
+        if (!_lstBackupFolders.Items.Cast<string>().Contains(dialog.SelectedPath, StringComparer.OrdinalIgnoreCase))
+            _lstBackupFolders.Items.Add(dialog.SelectedPath);
+    }
+
+    private async Task SaveBackupPlanAsync()
+    {
+        _btnBackupSave.Enabled = false;
+        try
+        {
+            var paths = _lstBackupFolders.Items.Cast<string>().ToArray();
+            var (success, message) = await _backupService.SavePlanAsync(
+                _chkBackupEnabled.Checked,
+                paths,
+                (int)_numBackupHour.Value);
+            _lblBackupStatus.Text = message;
+            MessageBox.Show(message, success ? "Başarılı" : "Yedekleme", MessageBoxButtons.OK,
+                success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+            if (success) await LoadBackupPlanAsync();
+        }
+        finally
+        {
+            _btnBackupSave.Enabled = true;
+        }
+    }
+
+    private async Task RunBackupNowAsync()
+    {
+        _btnBackupRunNow.Enabled = false;
+        _lblBackupStatus.Text = "Yedekleme kontrol ediliyor...";
+        try
+        {
+            var result = await _backupService.RunIfDueAsync(force: true);
+            _lblBackupStatus.Text = result.Message;
+            MessageBox.Show(result.Message,
+                result.Success ? "Yedekleme tamamlandı" : (result.RequiresApproval ? "Güvenlik kilidi" : "Yedekleme hatası"),
+                MessageBoxButtons.OK,
+                result.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+        }
+        finally
+        {
+            _btnBackupRunNow.Enabled = true;
+        }
     }
 
     private void AppendLog(string message)
