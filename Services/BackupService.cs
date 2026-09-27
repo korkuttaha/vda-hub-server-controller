@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -13,6 +14,7 @@ public sealed class ManualBackupRequest
     public DateTime RequestedAtUtc { get; set; }
     public string SnapshotFolder { get; set; } = string.Empty;
     public string State { get; set; } = string.Empty;
+    public bool CancelRequested { get; set; }
 }
 
 public sealed class BackupPlanResponse
@@ -23,6 +25,7 @@ public sealed class BackupPlanResponse
     public bool ManualOnly { get; set; }
     public string? Message { get; set; }
     public List<string> Paths { get; set; } = [];
+    public bool ArchiveEnabled { get; set; } = true;
     public ManualBackupRequest? ManualRequest { get; set; }
     public string? DestinationRoot { get; set; }
     public int ChunkSizeBytes { get; set; } = 8 * 1024 * 1024;
@@ -44,7 +47,7 @@ public sealed record BackupExecutionResult(
 
 public sealed class BackupService
 {
-    private const string BackupProtocol = "2";
+    private const string BackupProtocol = "3";
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(10) };
     private readonly ConfigService _config;
     private readonly string _statePath;
@@ -68,8 +71,10 @@ public sealed class BackupService
         public bool Deleted { get; set; }
     }
 
-    private sealed record CurrentFile(FileInfo File, string RootLabel, string Relative);
+    private sealed record CurrentFile(FileInfo File, string Root, string RootLabel, string Relative);
     private sealed record Change(string Path, CurrentFile Item, StateFile? Previous, string Kind);
+    private sealed record ArchiveArtifact(FileInfo File, IReadOnlyList<CurrentFile> SourceFiles);
+    private sealed class BackupStopRequestedException : OperationCanceledException { }
 
     public BackupService(ConfigService config)
     {
@@ -96,6 +101,7 @@ public sealed class BackupService
     public async Task<(bool Success, string Message)> SavePlanAsync(
         bool enabled,
         IReadOnlyList<string> paths,
+        bool archiveEnabled,
         CancellationToken ct = default)
     {
         var settings = _config.Current.Hub;
@@ -106,7 +112,8 @@ public sealed class BackupService
         {
             serverId = _config.Current.ServerId,
             enabled,
-            paths
+            paths,
+            archiveEnabled
         }, JsonOptions());
 
         using var request = Authorized(
@@ -129,12 +136,20 @@ public sealed class BackupService
         if (!await _gate.WaitAsync(0, ct))
             return new(false, true, "Yedekleme zaten çalışıyor.");
 
+        string? cleanupToken = null;
+        string? cleanupStagingRoot = null;
+        string? temporaryRoot = null;
+        string? activeRequestId = null;
+        var filesScannedForResult = 0;
+        var filesUploadedForResult = 0;
+        long bytesUploadedForResult = 0;
         try
         {
             var plan = await GetPlanAsync(ct);
             if (plan is null) return new(false, false, "Hub yedekleme planı alınamadı.");
             var command = plan.ManualRequest;
             if (command is null) return new(false, true, "Bekleyen manuel yedekleme komutu yok.");
+            activeRequestId = command.RequestId;
             if (string.IsNullOrWhiteSpace(command.RequestId) || string.IsNullOrWhiteSpace(command.SnapshotFolder))
                 return new(false, false, "Hub geçersiz yedekleme komutu döndürdü.");
 
@@ -150,6 +165,10 @@ public sealed class BackupService
             if (!await StartRequestAsync(command.RequestId, ct))
                 return new(false, false, "Hub yedekleme komutu artık geçerli değil.");
 
+            if (command.CancelRequested ||
+                await ReportProgressAsync(command.RequestId, "scanning", 0, 0, 0, 0, ct))
+                throw new BackupStopRequestedException();
+
             if (!plan.Enabled)
                 return await FailAsync(command.RequestId, "Yedekleme klasörleri etkin değil.", ct);
             if (!plan.Ready)
@@ -162,12 +181,17 @@ public sealed class BackupService
                 .GroupBy(x => x.Path, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(x => x.Key, x => x.Last(), StringComparer.OrdinalIgnoreCase);
             var scan = Scan(plan);
+            filesScannedForResult = scan.Files.Count;
             if (scan.Errors.Count > 0)
             {
                 var error = string.Join(" | ", scan.Errors.Take(8));
                 await ReportAsync(command.RequestId, false, scan.Files.Count, 0, 0, null, error, ct: ct);
                 return new(true, false, error, scan.Files.Count);
             }
+
+            var totalBytes = scan.Files.Values.Sum(x => x.File.Length);
+            if (await ReportProgressAsync(command.RequestId, "preparing", scan.Files.Count, 0, 0, totalBytes, ct))
+                throw new BackupStopRequestedException();
 
             var changes = new List<Change>();
             var descriptors = new List<string>();
@@ -222,7 +246,7 @@ public sealed class BackupService
             {
                 var message = $"Olası ransomware/toplu değişiklik: {changedFiles} dosya (%{changedPercent:0.##}), şüpheli yeniden adlandırma: {renameLike}. Yeni snapshot oluşturulmadı.";
                 await ReportAsync(command.RequestId, false, scan.Files.Count, 0, 0, null, message,
-                    true, fingerprint, changedFiles, changedPercent, renameLike, ct);
+                    true, fingerprint, changedFiles, changedPercent, renameLike, ct: ct);
                 return new(true, false, message, scan.Files.Count, RequiresApproval: true);
             }
 
@@ -232,45 +256,192 @@ public sealed class BackupService
 
             var stagingRoot = $"{plan.DestinationRoot!.TrimEnd('/')}/.uploading/{command.RequestId}";
             var finalRoot = $"{plan.DestinationRoot.TrimEnd('/')}/{command.SnapshotFolder}";
+            cleanupToken = accessToken;
+            cleanupStagingRoot = stagingRoot;
             var folders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var errors = new List<string>();
             var filesUploaded = 0;
             long bytesUploaded = 0;
+            var lastProgressAtUtc = DateTime.MinValue;
             var chunkSize = Math.Clamp(plan.ChunkSizeBytes, 1024 * 1024, 64 * 1024 * 1024);
             await EnsureFolderPathAsync(stagingRoot, accessToken, folders, ct);
 
-            foreach (var item in scan.Files.Values.OrderBy(x => x.File.FullName, StringComparer.OrdinalIgnoreCase))
+            if (plan.ArchiveEnabled)
             {
-                try
+                temporaryRoot = CreateTemporaryRoot(command.RequestId, totalBytes);
+                var lastCompressionProgressAtUtc = DateTime.MinValue;
+                async Task PushCompressionProgressAsync(int filesCompressed, long bytesCompressed, bool force)
                 {
-                    var remotePath = $"{stagingRoot}/{item.RootLabel}/{item.Relative}";
-                    await EnsureFolderPathAsync(remotePath[..remotePath.LastIndexOf('/')], accessToken, folders, ct);
-                    await UploadAsync(item.File, remotePath, accessToken, chunkSize, ct);
-                    filesUploaded++;
-                    bytesUploaded += item.File.Length;
+                    var now = DateTime.UtcNow;
+                    if (!force && now - lastCompressionProgressAtUtc < TimeSpan.FromSeconds(1)) return;
+                    lastCompressionProgressAtUtc = now;
+                    if (await ReportProgressAsync(
+                            command.RequestId,
+                            "compressing",
+                            scan.Files.Count,
+                            filesCompressed,
+                            bytesCompressed,
+                            totalBytes,
+                            ct))
+                        throw new BackupStopRequestedException();
                 }
-                catch (Exception ex)
+
+                if (await ReportProgressAsync(
+                        command.RequestId,
+                        "compressing",
+                        scan.Files.Count,
+                        0,
+                        0,
+                        totalBytes,
+                        ct))
+                    throw new BackupStopRequestedException();
+                var artifacts = await CreateArchivesAsync(
+                    scan.Files.Values,
+                    temporaryRoot,
+                    command,
+                    PushCompressionProgressAsync,
+                    ct);
+                await PushCompressionProgressAsync(scan.Files.Count, totalBytes, true);
+
+                var archiveTotalBytes = artifacts.Sum(x => x.File.Length);
+                if (await ReportProgressAsync(
+                        command.RequestId,
+                        "uploading",
+                        scan.Files.Count,
+                        0,
+                        0,
+                        archiveTotalBytes,
+                        ct))
+                    throw new BackupStopRequestedException();
+
+                async Task PushArchiveProgressAsync(long currentArchiveBytes, bool force = false)
                 {
-                    errors.Add(ex.Message);
+                    var now = DateTime.UtcNow;
+                    if (!force && now - lastProgressAtUtc < TimeSpan.FromSeconds(1)) return;
+                    lastProgressAtUtc = now;
+                    if (await ReportProgressAsync(
+                            command.RequestId,
+                            "uploading",
+                            scan.Files.Count,
+                            filesUploaded,
+                            bytesUploaded + currentArchiveBytes,
+                            archiveTotalBytes,
+                            ct))
+                        throw new BackupStopRequestedException();
                 }
+
+                foreach (var artifact in artifacts)
+                {
+                    try
+                    {
+                        await UploadAsync(
+                            artifact.File,
+                            $"{stagingRoot}/{artifact.File.Name}",
+                            accessToken,
+                            chunkSize,
+                            currentArchiveBytes => PushArchiveProgressAsync(currentArchiveBytes),
+                            ct);
+                        filesUploaded += artifact.SourceFiles.Count;
+                        bytesUploaded += artifact.File.Length;
+                        filesUploadedForResult = filesUploaded;
+                        bytesUploadedForResult = bytesUploaded;
+                        await PushArchiveProgressAsync(0);
+                    }
+                    catch (BackupStopRequestedException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        errors.Add(ex.Message);
+                    }
+                }
+                await PushArchiveProgressAsync(0, true);
+            }
+            else
+            {
+                if (await ReportProgressAsync(command.RequestId, "uploading", scan.Files.Count, 0, 0, totalBytes, ct))
+                    throw new BackupStopRequestedException();
+
+                async Task PushProgressAsync(long currentFileBytes, bool force = false)
+                {
+                    var now = DateTime.UtcNow;
+                    if (!force && now - lastProgressAtUtc < TimeSpan.FromSeconds(1)) return;
+                    lastProgressAtUtc = now;
+                    if (await ReportProgressAsync(
+                            command.RequestId,
+                            "uploading",
+                            scan.Files.Count,
+                            filesUploaded,
+                            bytesUploaded + currentFileBytes,
+                            totalBytes,
+                            ct))
+                        throw new BackupStopRequestedException();
+                }
+
+                foreach (var item in scan.Files.Values.OrderBy(x => x.File.FullName, StringComparer.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        var remotePath = $"{stagingRoot}/{item.RootLabel}/{item.Relative}";
+                        await EnsureFolderPathAsync(remotePath[..remotePath.LastIndexOf('/')], accessToken, folders, ct);
+                        await UploadAsync(
+                            item.File,
+                            remotePath,
+                            accessToken,
+                            chunkSize,
+                            currentFileBytes => PushProgressAsync(currentFileBytes),
+                            ct);
+                        filesUploaded++;
+                        bytesUploaded += item.File.Length;
+                        filesUploadedForResult = filesUploaded;
+                        bytesUploadedForResult = bytesUploaded;
+                        await PushProgressAsync(0);
+                    }
+                    catch (BackupStopRequestedException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        errors.Add(ex.Message);
+                    }
+                }
+                await PushProgressAsync(0, true);
             }
 
             if (errors.Count > 0)
             {
+                await DeleteDropboxPathIfExistsAsync(stagingRoot, accessToken, ct);
                 var errorText = string.Join(" | ", errors.Take(8));
                 await ReportAsync(command.RequestId, false, scan.Files.Count, filesUploaded, bytesUploaded, null,
-                    errorText, false, null, changedFiles, changedPercent, renameLike, ct);
+                    errorText, false, null, changedFiles, changedPercent, renameLike, ct: ct);
                 return new(true, false, errorText, scan.Files.Count, filesUploaded, bytesUploaded);
             }
 
             try
             {
+                if (await ReportProgressAsync(
+                        command.RequestId,
+                        "finalizing",
+                        scan.Files.Count,
+                        filesUploaded,
+                        bytesUploaded,
+                        bytesUploaded,
+                        ct))
+                    throw new BackupStopRequestedException();
                 await MoveSnapshotAsync(stagingRoot, finalRoot, accessToken, ct);
+                cleanupStagingRoot = null;
+            }
+            catch (BackupStopRequestedException)
+            {
+                throw;
             }
             catch (Exception ex)
             {
+                await DeleteDropboxPathIfExistsAsync(stagingRoot, accessToken, CancellationToken.None);
                 await ReportAsync(command.RequestId, false, scan.Files.Count, filesUploaded, bytesUploaded,
-                    null, ex.Message, false, null, changedFiles, changedPercent, renameLike, ct);
+                    null, ex.Message, false, null, changedFiles, changedPercent, renameLike, ct: ct);
                 return new(true, false, ex.Message, scan.Files.Count, filesUploaded, bytesUploaded);
             }
             state.Files = scan.Files.Select(pair => new StateFile
@@ -288,13 +459,59 @@ public sealed class BackupService
             SaveState(state);
 
             await ReportAsync(command.RequestId, true, scan.Files.Count, filesUploaded, bytesUploaded,
-                finalRoot, null, false, null, changedFiles, changedPercent, renameLike, ct);
+                finalRoot, null, false, null, changedFiles, changedPercent, renameLike, ct: ct);
             return new(true, true,
                 $"Tarih damgalı snapshot tamamlandı: {filesUploaded}/{scan.Files.Count} dosya, {FormatBytes(bytesUploaded)}.",
                 scan.Files.Count, filesUploaded, bytesUploaded);
         }
+        catch (BackupStopRequestedException)
+        {
+            if (!string.IsNullOrWhiteSpace(cleanupToken) && !string.IsNullOrWhiteSpace(cleanupStagingRoot))
+                await DeleteDropboxPathIfExistsAsync(cleanupStagingRoot, cleanupToken, CancellationToken.None);
+            if (!string.IsNullOrWhiteSpace(activeRequestId))
+                await ReportAsync(
+                    activeRequestId,
+                    false,
+                    filesScannedForResult,
+                    filesUploadedForResult,
+                    bytesUploadedForResult,
+                    null,
+                    "Yedekleme kullanıcı tarafından durduruldu.",
+                    cancelled: true,
+                    ct: CancellationToken.None);
+            return new(
+                true,
+                false,
+                "Yedekleme kullanıcı tarafından durduruldu; geçici dosyalar temizlendi.",
+                filesScannedForResult,
+                filesUploadedForResult,
+                bytesUploadedForResult);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            if (!string.IsNullOrWhiteSpace(cleanupToken) && !string.IsNullOrWhiteSpace(cleanupStagingRoot))
+                await DeleteDropboxPathIfExistsAsync(cleanupStagingRoot, cleanupToken, CancellationToken.None);
+            if (!string.IsNullOrWhiteSpace(activeRequestId))
+                await ReportAsync(
+                    activeRequestId,
+                    false,
+                    filesScannedForResult,
+                    filesUploadedForResult,
+                    bytesUploadedForResult,
+                    null,
+                    ex.Message,
+                    ct: CancellationToken.None);
+            return new(
+                true,
+                false,
+                ex.Message,
+                filesScannedForResult,
+                filesUploadedForResult,
+                bytesUploadedForResult);
+        }
         finally
         {
+            DeleteTemporaryRoot(temporaryRoot);
             _gate.Release();
         }
     }
@@ -307,6 +524,140 @@ public sealed class BackupService
     {
         await ReportAsync(requestId, false, filesScanned, 0, 0, null, message, ct: ct);
         return new(true, false, message, filesScanned);
+    }
+
+    private static string CreateTemporaryRoot(string requestId, long sourceBytes)
+    {
+        var basePath = Path.Combine(Path.GetTempPath(), "VDAKor", "backups");
+        var rootPath = Path.GetPathRoot(Path.GetFullPath(basePath))
+            ?? throw new IOException("Geçici yedekleme diski belirlenemedi.");
+        var drive = new DriveInfo(rootPath);
+        var safety = Math.Max(512L * 1024 * 1024, sourceBytes / 20);
+        var required = sourceBytes > long.MaxValue - safety ? long.MaxValue : sourceBytes + safety;
+        if (drive.AvailableFreeSpace < required)
+            throw new IOException(
+                $"ZIP hazırlamak için geçici diskte yeterli boş alan yok. Gerekli: {FormatBytes(required)}, kullanılabilir: {FormatBytes(drive.AvailableFreeSpace)}.");
+
+        Directory.CreateDirectory(basePath);
+        foreach (var stale in new DirectoryInfo(basePath).EnumerateDirectories())
+        {
+            if (stale.Name.Length != 32 || !stale.Name.All(Uri.IsHexDigit) ||
+                stale.LastWriteTimeUtc >= DateTime.UtcNow.AddDays(-1)) continue;
+            try { stale.Delete(true); } catch { }
+        }
+        var temporaryRoot = Path.Combine(basePath, requestId);
+        if (Directory.Exists(temporaryRoot)) Directory.Delete(temporaryRoot, true);
+        Directory.CreateDirectory(temporaryRoot);
+        return temporaryRoot;
+    }
+
+    private static async Task<List<ArchiveArtifact>> CreateArchivesAsync(
+        IEnumerable<CurrentFile> files,
+        string temporaryRoot,
+        ManualBackupRequest command,
+        Func<int, long, bool, Task> progress,
+        CancellationToken ct)
+    {
+        var groups = files
+            .GroupBy(x => x.RootLabel, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
+            .Select(x => new
+            {
+                RootLabel = x.Key,
+                Files = (IReadOnlyList<CurrentFile>)x.OrderBy(
+                    item => item.Relative,
+                    StringComparer.OrdinalIgnoreCase).ToArray()
+            })
+            .ToArray();
+        var artifacts = new List<ArchiveArtifact>();
+        var filesCompressed = 0;
+        long bytesCompressed = 0;
+        var buffer = new byte[1024 * 1024];
+
+        foreach (var group in groups)
+        {
+            ct.ThrowIfCancellationRequested();
+            var archivePath = Path.Combine(temporaryRoot, group.RootLabel + ".zip");
+            await using (var archiveStream = new FileStream(
+                             archivePath,
+                             FileMode.CreateNew,
+                             FileAccess.ReadWrite,
+                             FileShare.None,
+                             buffer.Length,
+                             true))
+            using (var archive = new ZipArchive(archiveStream, ZipArchiveMode.Create, leaveOpen: false))
+            {
+                foreach (var item in group.Files)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var initialLength = item.File.Length;
+                    var initialTicks = item.File.LastWriteTimeUtc.Ticks;
+                    var entry = archive.CreateEntry(item.Relative.Replace('\\', '/'), CompressionLevel.Fastest);
+                    await using var source = new FileStream(
+                        item.File.FullName,
+                        FileMode.Open,
+                        FileAccess.Read,
+                        FileShare.ReadWrite,
+                        buffer.Length,
+                        true);
+                    await using var destination = entry.Open();
+                    while (true)
+                    {
+                        var read = await source.ReadAsync(buffer, ct);
+                        if (read == 0) break;
+                        await destination.WriteAsync(buffer.AsMemory(0, read), ct);
+                        bytesCompressed += read;
+                        await progress(filesCompressed, bytesCompressed, false);
+                    }
+
+                    item.File.Refresh();
+                    if (item.File.Length != initialLength || item.File.LastWriteTimeUtc.Ticks != initialTicks)
+                        throw new IOException($"Dosya arşivlenirken değişti; snapshot tamamlanmadı: {item.File.FullName}");
+                    filesCompressed++;
+                    await progress(filesCompressed, bytesCompressed, false);
+                }
+            }
+
+            using (var verification = ZipFile.OpenRead(archivePath))
+            {
+                if (verification.Entries.Count != group.Files.Count)
+                    throw new InvalidDataException($"ZIP doğrulaması başarısız: {archivePath}");
+            }
+            artifacts.Add(new ArchiveArtifact(new FileInfo(archivePath), group.Files));
+        }
+
+        var manifestPath = Path.Combine(temporaryRoot, "manifest.json");
+        var manifest = new
+        {
+            formatVersion = 1,
+            command.RequestId,
+            command.SnapshotFolder,
+            createdAtUtc = DateTime.UtcNow,
+            archives = groups.Select(group => new
+            {
+                fileName = group.RootLabel + ".zip",
+                group.RootLabel,
+                sourcePath = group.Files.FirstOrDefault()?.Root,
+                files = group.Files.Select(item => new
+                {
+                    path = item.Relative.Replace('\\', '/'),
+                    size = item.File.Length,
+                    lastWriteAtUtc = item.File.LastWriteTimeUtc
+                })
+            })
+        };
+        await File.WriteAllTextAsync(
+            manifestPath,
+            JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }),
+            ct);
+        artifacts.Add(new ArchiveArtifact(new FileInfo(manifestPath), []));
+        return artifacts;
+    }
+
+    private static void DeleteTemporaryRoot(string? temporaryRoot)
+    {
+        if (string.IsNullOrWhiteSpace(temporaryRoot) || !Directory.Exists(temporaryRoot)) return;
+        try { Directory.Delete(temporaryRoot, true); } catch { }
     }
 
     private (Dictionary<string, CurrentFile> Files, List<string> Errors) Scan(BackupPlanResponse plan)
@@ -322,7 +673,7 @@ public sealed class BackupService
                 foreach (var file in EnumerateFilesSafe(root))
                 {
                     var relative = Path.GetRelativePath(root, file.FullName).Replace('\\', '/');
-                    files[file.FullName] = new(file, rootLabel, relative);
+                    files[file.FullName] = new(file, root, rootLabel, relative);
                 }
             }
             catch (Exception ex)
@@ -419,6 +770,7 @@ public sealed class BackupService
         int changedFiles = 0,
         double changedPercent = 0,
         int renameLikeChanges = 0,
+        bool cancelled = false,
         CancellationToken ct = default)
     {
         var settings = _config.Current.Hub;
@@ -437,11 +789,56 @@ public sealed class BackupService
             anomalyFingerprint = fingerprint,
             changedFiles,
             changedPercent,
-            renameLikeChanges
+            renameLikeChanges,
+            cancelled
         }, JsonOptions());
         using var request = Authorized(HttpMethod.Post, new Uri(baseUri, "/api/server-controller/bridge/backup-result"), settings.ApiKey);
         request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
         try { using var _ = await Http.SendAsync(request, ct); } catch { }
+    }
+
+    private async Task<bool> ReportProgressAsync(
+        string requestId,
+        string phase,
+        int filesScanned,
+        int filesUploaded,
+        long bytesUploaded,
+        long totalBytes,
+        CancellationToken ct)
+    {
+        var settings = _config.Current.Hub;
+        if (!TryBridgeBase(settings, out var baseUri)) return false;
+        var payload = JsonSerializer.Serialize(new
+        {
+            serverId = _config.Current.ServerId,
+            requestId,
+            phase,
+            filesScanned,
+            filesUploaded,
+            bytesUploaded,
+            totalBytes
+        }, JsonOptions());
+        using var request = Authorized(
+            HttpMethod.Post,
+            new Uri(baseUri, "/api/server-controller/bridge/backup-progress"),
+            settings.ApiKey);
+        request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+        try
+        {
+            using var response = await Http.SendAsync(request, ct);
+            if (!response.IsSuccessStatusCode) return false;
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            return document.RootElement.TryGetProperty("cancelRequested", out var cancelled) &&
+                   cancelled.ValueKind == JsonValueKind.True;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static async Task EnsureFolderPathAsync(
@@ -480,11 +877,32 @@ public sealed class BackupService
             throw new IOException($"Tamamlanan snapshot tarih klasörüne taşınamadı: {destination}");
     }
 
+    private static async Task DeleteDropboxPathIfExistsAsync(
+        string path,
+        string accessToken,
+        CancellationToken ct)
+    {
+        try
+        {
+            using var response = await DropboxJsonAsync(
+                "https://api.dropboxapi.com/2/files/delete_v2",
+                accessToken,
+                new { path },
+                ct);
+            if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.Conflict) return;
+        }
+        catch
+        {
+            // Cancellation cleanup is best effort; the Hub request is still completed as cancelled.
+        }
+    }
+
     private static async Task UploadAsync(
         FileInfo file,
         string remotePath,
         string accessToken,
         int chunkSize,
+        Func<long, Task> progress,
         CancellationToken ct)
     {
         const long maxFile = 2_199_019_061_248L;
@@ -506,6 +924,7 @@ public sealed class BackupService
         var sessionId = startDoc.RootElement.GetProperty("session_id").GetString()
             ?? throw new IOException("Dropbox session id eksik.");
         long offset = first;
+        await progress(offset);
 
         while (offset < initialLength)
         {
@@ -525,6 +944,7 @@ public sealed class BackupService
             using var response = await DropboxContentAsync(url, accessToken, arg, buffer, count, ct);
             if (!response.IsSuccessStatusCode) throw new IOException($"Dropbox yüklemesi başarısız: {file.FullName}");
             offset += count;
+            await progress(offset);
         }
 
         if (initialLength <= first)
@@ -542,6 +962,7 @@ public sealed class BackupService
                 0,
                 ct);
             if (!response.IsSuccessStatusCode) throw new IOException($"Dropbox yüklemesi tamamlanamadı: {file.FullName}");
+            await progress(offset);
         }
 
         file.Refresh();
