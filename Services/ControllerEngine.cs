@@ -8,6 +8,7 @@ public class ControllerEngine
     private readonly DiskMonitorService _diskMonitor;
     private readonly BrevoEmailService _brevoService;
     private readonly HubClientService _hubClient;
+    private readonly BackupService _backupService;
 
     public event Action<string>? OnLog;
     public event Action<ServerStatusReport>? OnReportUpdated;
@@ -18,12 +19,14 @@ public class ControllerEngine
         ConfigService configService,
         DiskMonitorService diskMonitor,
         BrevoEmailService brevoService,
-        HubClientService hubClient)
+        HubClientService hubClient,
+        BackupService backupService)
     {
         _configService = configService;
         _diskMonitor = diskMonitor;
         _brevoService = brevoService;
         _hubClient = hubClient;
+        _backupService = backupService;
     }
 
     private void Log(string message)
@@ -55,7 +58,15 @@ public class ControllerEngine
             Log(hubSuccess ? $"✓ VDA Hub: {hubMsg}" : $"✗ VDA Hub Hatası: {hubMsg}");
         }
 
-        // 2. Brevo E-Posta İşlemleri
+        // 2. Dropbox klasör yedekleme
+        if (config.Hub.Enabled)
+        {
+            var backup = await _backupService.RunIfDueAsync(false, ct);
+            if (backup.Ran)
+                Log(backup.Success ? $"✓ Dropbox Yedek: {backup.Message}" : $"✗ Dropbox Yedek: {backup.Message}");
+        }
+
+        // 3. Brevo E-Posta İşlemleri
         if (config.Brevo.Enabled || forceEmail)
         {
             await HandleBrevoNotificationsAsync(config, report, forceEmail, ct);

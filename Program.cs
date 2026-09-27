@@ -72,7 +72,8 @@ internal static class Program
         var diskMonitor = new DiskMonitorService();
         var brevoService = new BrevoEmailService();
         var hubClient = new HubClientService();
-        var engine = new ControllerEngine(configService, diskMonitor, brevoService, hubClient);
+        var backupService = new BackupService(configService);
+        var engine = new ControllerEngine(configService, diskMonitor, brevoService, hubClient, backupService);
 
         if (args.Contains("--test-mail", StringComparer.OrdinalIgnoreCase))
         {
@@ -89,6 +90,14 @@ internal static class Program
             var (success, msg, code) = await hubClient.SendReportAsync(configService.Current.Hub, report);
             Console.WriteLine(success ? $"✓ [HTTP {code}] {msg}" : $"✗ [HTTP {code}] {msg}");
             return success ? 0 : 1;
+        }
+
+        if (args.Contains("--backup-now", StringComparer.OrdinalIgnoreCase))
+        {
+            Console.WriteLine("\n[VDA Hub] Dropbox yedekleme zorla başlatılıyor...");
+            var result = await backupService.RunIfDueAsync(force: true);
+            Console.WriteLine(result.Success ? $"✓ {result.Message}" : $"✗ {result.Message}");
+            return result.Success ? 0 : 1;
         }
 
         if (args.Contains("--run-once", StringComparer.OrdinalIgnoreCase))
@@ -116,7 +125,7 @@ internal static class Program
         using var cts = new CancellationTokenSource();
         _ = Task.Run(() => engine.StartLoopAsync(cts.Token));
 
-        var mainForm = new MainForm(configService, engine, brevoService, hubClient);
+        var mainForm = new MainForm(configService, engine, brevoService, hubClient, backupService);
 
         // Run UI message loop
         Application.Run(mainForm);
@@ -145,6 +154,7 @@ Seçenekler:
   --run-once          : Diskleri tek sefer tarar, raporu üretir ve çıkar.
   --test-mail         : Brevo API ile yapılandırılan adrese test e-postası yollar.
   --test-hub          : VDA Hub API uç noktasına test raporu gönderir.
+  --backup-now        : Dropbox klasör yedeklemesini zaman beklemeden çalıştırır.
   --help, -h          : Bu yardım menüsünü görüntüler.
 
 Konfigürasyon:
@@ -167,6 +177,7 @@ Konfigürasyon:
                     services.AddSingleton<DiskMonitorService>();
                     services.AddSingleton<BrevoEmailService>();
                     services.AddSingleton<HubClientService>();
+                    services.AddSingleton<BackupService>();
                     services.AddSingleton<ControllerEngine>();
                     services.AddHostedService<WorkerService>();
                 });
