@@ -33,28 +33,9 @@ jobs:
       - name: Resolve release tag
         shell: pwsh
         run: |
-          $tag = if ('${{ github.event_name }' -eq 'workflow_dispatch') { '${{ inputs.tag }' } else { '${{ github.ref_name }' }
+          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
           if ($tag.StartsWith('release/')) { $tag = $tag.Substring('release/'.Length) }
-          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+        run: |
-          dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ./publish
-
-      - name: Package Zip Archive
-        run: |
-          Compress-Archive -Path ./publish/VdaHubServerController.exe, ./config.example.json, ./README.md -DestinationPath ./publish/vda-hub-server-controller-win-x64.zip
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }
-          target_commitish: ${{ github.sha }
-          files: |
-            ./publish/VdaHubServerController.exe
-            ./publish/vda-hub-server-controller-win-x64.zip
-          name: Release ${{ env.RELEASE_TAG }
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-) { throw "Invalid release tag: $tag" }
+          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "Invalid release tag: $tag" }
           "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Publish Single-File Self-Contained Exe
@@ -62,16 +43,19 @@ jobs:
           dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ./publish
 
       - name: Package Zip Archive
+        shell: pwsh
         run: |
           Compress-Archive -Path ./publish/VdaHubServerController.exe, ./config.example.json, ./README.md -DestinationPath ./publish/vda-hub-server-controller-win-x64.zip
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
           files: |
             ./publish/VdaHubServerController.exe
             ./publish/vda-hub-server-controller-win-x64.zip
-          name: Release ${{ github.ref_name }}
+          name: Release ${{ env.RELEASE_TAG }}
           draft: false
           prerelease: false
           generate_release_notes: true
