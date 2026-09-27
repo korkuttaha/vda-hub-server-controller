@@ -132,8 +132,7 @@ public class MainForm : Form
             AutoSize = false,
             Size = new Size(200, 32),
             TextAlign = ContentAlignment.MiddleCenter,
-            Location = new Point(410, 24),
-            Anchor = AnchorStyles.Top | AnchorStyles.Right
+            Margin = new Padding(0, 0, 12, 0)
         };
 
         _btnScanNow = new Button
@@ -145,7 +144,7 @@ public class MainForm : Form
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
             Cursor = Cursors.Hand,
-            Anchor = AnchorStyles.Top | AnchorStyles.Right
+            Margin = new Padding(0, 0, 10, 0)
         };
         _btnScanNow.FlatAppearance.BorderSize = 0;
         _btnScanNow.Click += async (s, e) => await TriggerManualScan();
@@ -159,12 +158,23 @@ public class MainForm : Form
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
             Cursor = Cursors.Hand,
-            Anchor = AnchorStyles.Top | AnchorStyles.Right
+            Margin = Padding.Empty
         };
         _btnCloseSettings.FlatAppearance.BorderSize = 0;
         _btnCloseSettings.Click += (s, e) => Close();
 
-        pnlHeader.Controls.AddRange(new Control[] { _lblServerTitle, _lblServerMeta, _lblStatusBadge, _btnScanNow, _btnCloseSettings });
+        var pnlHeaderActions = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Right,
+            Width = 465,
+            Padding = new Padding(0, 23, 17, 0),
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            BackColor = pnlHeader.BackColor
+        };
+        pnlHeaderActions.Controls.AddRange(new Control[] { _lblStatusBadge, _btnScanNow, _btnCloseSettings });
+
+        pnlHeader.Controls.AddRange(new Control[] { _lblServerTitle, _lblServerMeta, pnlHeaderActions });
 
         // 2. Tab Control
         _tabControl = new TabControl

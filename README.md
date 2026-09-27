@@ -11,6 +11,7 @@
 - **🌐 VDA Hub Entegrasyonu:** Merkezi Hub API'sine (`POST /api/v1/servers/report`) JSON formatında periyodik durum aktarımı (Bearer Token / X-API-Key destekli).
 - **🔑 Generic EXE eşleştirmesi:** Aynı EXE bütün sunucularda kullanılır; ilk açılışta Hub'ın tek kullanımlık Kurulum Anahtarı girilir.
 - **☁️ Manuel tam Dropbox snapshot:** Agent'ın uygulama içi seçicisinden veya Hub'dan kaydedilen klasörleri iki yönlü eşitler; yalnız Hub'daki **YEDEKLE** komutuyla bütün dosyaları `VDAKor Hub/VDA Backups/Sunucu/Tarih` altına yükler. Zamanlama ve otomatik silme yoktur.
+- **📈 Canlı yedekleme ilerlemesi:** Tarama, hazırlık, yükleme ve tamamlama aşamalarını; dosya ve bayt sayaçlarını Hub'a periyodik olarak bildirir.
 - **✉️ Brevo (Sendinblue) E-Posta Raporlama:**
   - **Günlük Durum Bülteni:** Her sabah belirlenen saatte (örn. `09:00`) sunucunun tüm disk durumunu renkli ilerleme çubukları ve sağlık rozetleri içeren modern HTML formatında e-posta olarak iletir.
   - **Kritik Eşik Alarmı:** Disk doluluğu kritik seviyeyi (örn. `%90`) aştığında veya SMART arıza uyarısı alındığında anında acil durum uyarısı gönderir.
@@ -63,6 +64,8 @@ flowchart TD
 Servis kullanıcı oturumu olmasa da çalışır; taskbar veya sistem tepsisinde ikon göstermez. EXE sonradan çift tıklanırsa geçici ayar ekranı açılır; pencere kapandığında yalnız ayar uygulaması kapanır, servis devam eder.
 
 Yedekleme sekmesindeki **Klasör Ekle** düğmesi sunucunun sürücülerini uygulama içinde, arayüzü kilitlemeden listeler. Kaydedilen yollar Hub'daki aynı sunucu kaydına yazılır ve Hub sayfası yenilendiğinde klasör alanında görünür. Hub'da kaydedilen yollar da agent ekranı yeniden açıldığında yüklenir.
+
+Ana ekrandaki durum rozeti, **Şimdi Tara** ve **Ayarları Kapat** kontrolleri DPI veya pencere genişliği değişse de sağ üstte görünür kalır. **Şimdi Tara** mantıksal sürücüleri ve fiziksel disk/SMART bilgisini anında yeniler.
 
 Kalıcı API anahtarı elle düzenlenmez. Sunucuyu başka veya yenilenmiş bir Hub anahtarıyla bağlamak için Hub'da mevcut sunucu kaydından yeni `vda_setup_...` Kurulum Anahtarı üretip Ayarlar'daki **Yeniden Eşleştir** düğmesini kullanın; başarılı işlemden sonra headless servis yeni anahtarla yeniden başlatılır.
 

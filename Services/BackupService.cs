@@ -150,6 +150,8 @@ public sealed class BackupService
             if (!await StartRequestAsync(command.RequestId, ct))
                 return new(false, false, "Hub yedekleme komutu artık geçerli değil.");
 
+            await ReportProgressAsync(command.RequestId, "scanning", 0, 0, 0, 0, ct);
+
             if (!plan.Enabled)
                 return await FailAsync(command.RequestId, "Yedekleme klasörleri etkin değil.", ct);
             if (!plan.Ready)
@@ -168,6 +170,9 @@ public sealed class BackupService
                 await ReportAsync(command.RequestId, false, scan.Files.Count, 0, 0, null, error, ct: ct);
                 return new(true, false, error, scan.Files.Count);
             }
+
+            var totalBytes = scan.Files.Values.Sum(x => x.File.Length);
+            await ReportProgressAsync(command.RequestId, "preparing", scan.Files.Count, 0, 0, totalBytes, ct);
 
             var changes = new List<Change>();
             var descriptors = new List<string>();
@@ -236,8 +241,26 @@ public sealed class BackupService
             var errors = new List<string>();
             var filesUploaded = 0;
             long bytesUploaded = 0;
+            var lastProgressAtUtc = DateTime.MinValue;
             var chunkSize = Math.Clamp(plan.ChunkSizeBytes, 1024 * 1024, 64 * 1024 * 1024);
             await EnsureFolderPathAsync(stagingRoot, accessToken, folders, ct);
+
+            await ReportProgressAsync(command.RequestId, "uploading", scan.Files.Count, 0, 0, totalBytes, ct);
+
+            async Task PushProgressAsync(long currentFileBytes, bool force = false)
+            {
+                var now = DateTime.UtcNow;
+                if (!force && now - lastProgressAtUtc < TimeSpan.FromSeconds(1)) return;
+                lastProgressAtUtc = now;
+                await ReportProgressAsync(
+                    command.RequestId,
+                    "uploading",
+                    scan.Files.Count,
+                    filesUploaded,
+                    bytesUploaded + currentFileBytes,
+                    totalBytes,
+                    ct);
+            }
 
             foreach (var item in scan.Files.Values.OrderBy(x => x.File.FullName, StringComparer.OrdinalIgnoreCase))
             {
@@ -245,9 +268,16 @@ public sealed class BackupService
                 {
                     var remotePath = $"{stagingRoot}/{item.RootLabel}/{item.Relative}";
                     await EnsureFolderPathAsync(remotePath[..remotePath.LastIndexOf('/')], accessToken, folders, ct);
-                    await UploadAsync(item.File, remotePath, accessToken, chunkSize, ct);
+                    await UploadAsync(
+                        item.File,
+                        remotePath,
+                        accessToken,
+                        chunkSize,
+                        currentFileBytes => PushProgressAsync(currentFileBytes),
+                        ct);
                     filesUploaded++;
                     bytesUploaded += item.File.Length;
+                    await PushProgressAsync(0);
                 }
                 catch (Exception ex)
                 {
@@ -265,6 +295,15 @@ public sealed class BackupService
 
             try
             {
+                await PushProgressAsync(0, true);
+                await ReportProgressAsync(
+                    command.RequestId,
+                    "finalizing",
+                    scan.Files.Count,
+                    filesUploaded,
+                    bytesUploaded,
+                    totalBytes,
+                    ct);
                 await MoveSnapshotAsync(stagingRoot, finalRoot, accessToken, ct);
             }
             catch (Exception ex)
@@ -444,6 +483,35 @@ public sealed class BackupService
         try { using var _ = await Http.SendAsync(request, ct); } catch { }
     }
 
+    private async Task ReportProgressAsync(
+        string requestId,
+        string phase,
+        int filesScanned,
+        int filesUploaded,
+        long bytesUploaded,
+        long totalBytes,
+        CancellationToken ct)
+    {
+        var settings = _config.Current.Hub;
+        if (!TryBridgeBase(settings, out var baseUri)) return;
+        var payload = JsonSerializer.Serialize(new
+        {
+            serverId = _config.Current.ServerId,
+            requestId,
+            phase,
+            filesScanned,
+            filesUploaded,
+            bytesUploaded,
+            totalBytes
+        }, JsonOptions());
+        using var request = Authorized(
+            HttpMethod.Post,
+            new Uri(baseUri, "/api/server-controller/bridge/backup-progress"),
+            settings.ApiKey);
+        request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
+        try { using var _ = await Http.SendAsync(request, ct); } catch { }
+    }
+
     private static async Task EnsureFolderPathAsync(
         string folderPath,
         string accessToken,
@@ -485,6 +553,7 @@ public sealed class BackupService
         string remotePath,
         string accessToken,
         int chunkSize,
+        Func<long, Task> progress,
         CancellationToken ct)
     {
         const long maxFile = 2_199_019_061_248L;
@@ -506,6 +575,7 @@ public sealed class BackupService
         var sessionId = startDoc.RootElement.GetProperty("session_id").GetString()
             ?? throw new IOException("Dropbox session id eksik.");
         long offset = first;
+        await progress(offset);
 
         while (offset < initialLength)
         {
@@ -525,6 +595,7 @@ public sealed class BackupService
             using var response = await DropboxContentAsync(url, accessToken, arg, buffer, count, ct);
             if (!response.IsSuccessStatusCode) throw new IOException($"Dropbox yüklemesi başarısız: {file.FullName}");
             offset += count;
+            await progress(offset);
         }
 
         if (initialLength <= first)
@@ -542,6 +613,7 @@ public sealed class BackupService
                 0,
                 ct);
             if (!response.IsSuccessStatusCode) throw new IOException($"Dropbox yüklemesi tamamlanamadı: {file.FullName}");
+            await progress(offset);
         }
 
         file.Refresh();
