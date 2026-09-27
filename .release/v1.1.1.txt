@@ -1,0 +1,2 @@
+VDA Hub Server Controller v1.1.1
+Generic pairing + integrated guarded Dropbox backup + protected ProgramData install.
