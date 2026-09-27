@@ -1,3 +1,5 @@
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text.Json;
 using VdaHubServerController.Models;
 
@@ -10,6 +12,10 @@ public class ConfigService
     private AppConfig _currentConfig;
 
     public AppConfig Current => _currentConfig;
+    public static string InstallDirectory => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "VDAKor",
+        "ServerAgent");
 
     public ConfigService(string? customPath = null)
     {
@@ -19,25 +25,49 @@ public class ConfigService
 
     private static string DetermineConfigPath()
     {
-        string localPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
-        try
+        EnsureProtectedInstallDirectory();
+        var securePath = Path.Combine(InstallDirectory, "config.json");
+        if (File.Exists(securePath)) return securePath;
+
+        var candidates = new[]
         {
-            // Test write permissions in local folder
-            string testFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".perm_test");
-            File.WriteAllText(testFile, "test");
-            File.Delete(testFile);
-            return localPath;
-        }
-        catch
-        {
-            // If running in Program Files or protected directory, use ProgramData
-            string appData = Path.Combine(
+            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json"),
+            Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "VdaHubServerController"
-            );
-            Directory.CreateDirectory(appData);
-            return Path.Combine(appData, "config.json");
+                "VdaHubServerController",
+                "config.json")
+        };
+
+        foreach (var source in candidates)
+        {
+            if (!File.Exists(source) ||
+                Path.GetFullPath(source).Equals(Path.GetFullPath(securePath), StringComparison.OrdinalIgnoreCase))
+                continue;
+            File.Copy(source, securePath, overwrite: false);
+            break;
         }
+
+        return securePath;
+    }
+
+    public static void EnsureProtectedInstallDirectory()
+    {
+        Directory.CreateDirectory(InstallDirectory);
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+
+        foreach (var sidValue in new[] { "S-1-5-18", "S-1-5-32-544" })
+        {
+            var sid = new SecurityIdentifier(sidValue);
+            security.AddAccessRule(new FileSystemAccessRule(
+                sid,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+        }
+
+        new DirectoryInfo(InstallDirectory).SetAccessControl(security);
     }
 
     public string ConfigFilePath => _configFilePath;
@@ -78,23 +108,21 @@ public class ConfigService
     {
         lock (LockObj)
         {
-            if (config != null)
-            {
-                _currentConfig = config;
-            }
+            if (config != null) _currentConfig = config;
 
-            string dir = Path.GetDirectoryName(_configFilePath)!;
-            if (!Directory.Exists(dir))
-            {
-                Directory.CreateDirectory(dir);
-            }
-
-            var options = new JsonSerializerOptions
-            {
-                WriteIndented = true
-            };
+            EnsureProtectedInstallDirectory();
+            var options = new JsonSerializerOptions { WriteIndented = true };
             string json = JsonSerializer.Serialize(_currentConfig, options);
-            File.WriteAllText(_configFilePath, json);
+            var temporary = _configFilePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(temporary, json);
+                File.Move(temporary, _configFilePath, overwrite: true);
+            }
+            finally
+            {
+                if (File.Exists(temporary)) File.Delete(temporary);
+            }
         }
     }
 }
