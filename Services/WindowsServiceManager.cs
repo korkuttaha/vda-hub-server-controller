@@ -6,16 +6,29 @@ public static class WindowsServiceManager
 {
     public const string ServiceName = "VdaHubServerController";
     public const string DisplayName = "VDA Hub Server Controller";
-    public const string Description = "Sunucu disk ve HDD durumlarını izler, VDA Hub ve Brevo bildirimlerini iletir.";
+    public const string Description = "Sunucu disk/CPU/RAM durumunu izler, VDA Hub raporlarını ve güvenli Dropbox yedeklemeyi çalıştırır.";
 
     public static (bool Success, string Output) InstallService(string exePath)
     {
-        string binPath = $"\"{exePath}\" --service";
-        var res1 = RunSc($"create \"{ServiceName}\" binPath= \"{binPath}\" start= auto DisplayName= \"{DisplayName}\"");
-        if (!res1.Success) return res1;
+        try
+        {
+            ConfigService.EnsureProtectedInstallDirectory();
+            var source = Path.GetFullPath(exePath);
+            var installedExe = Path.Combine(ConfigService.InstallDirectory, "VdaHubServerController.exe");
+            if (!source.Equals(Path.GetFullPath(installedExe), StringComparison.OrdinalIgnoreCase))
+                File.Copy(source, installedExe, overwrite: true);
 
-        RunSc($"description \"{ServiceName}\" \"{Description}\"");
-        return (true, $"'{DisplayName}' başarıyla Windows Servisi olarak yüklendi (Otomatik Başlatma).");
+            string binPath = $"\"{installedExe}\" --service";
+            var res1 = RunSc($"create \"{ServiceName}\" binPath= \"{binPath}\" start= auto DisplayName= \"{DisplayName}\"");
+            if (!res1.Success) return res1;
+
+            RunSc($"description \"{ServiceName}\" \"{Description}\"");
+            return (true, $"'{DisplayName}' başarıyla {installedExe} konumuna kuruldu (Otomatik Başlatma).");
+        }
+        catch (Exception ex)
+        {
+            return (false, "Güvenli servis kurulumu başarısız: " + ex.Message);
+        }
     }
 
     public static (bool Success, string Output) UninstallService()
