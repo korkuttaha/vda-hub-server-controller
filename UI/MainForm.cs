@@ -50,6 +50,7 @@ public class MainForm : Form
 
     // Backup controls
     private CheckBox _chkBackupEnabled = null!;
+    private CheckBox _chkBackupArchive = null!;
     private ListBox _lstBackupFolders = null!;
     private Label _lblBackupStatus = null!;
     private Button _btnBackupAddFolder = null!;
@@ -473,7 +474,7 @@ public class MainForm : Form
         };
         var description = new Label
         {
-            Text = "Bu sunucuda yedeklenecek tam klasör yollarını ekleyin. Yedek yalnız Hub'daki YEDEKLE komutuyla başlar ve yeni bir tarih klasörüne tüm dosyaları yükler.",
+            Text = "Bu sunucuda yedeklenecek tam klasör yollarını ekleyin. Yedek yalnız Hub'daki YEDEKLE komutuyla başlar; önerilen arşiv modu klasör başına hızlı ZIP64 oluşturur.",
             Location = new Point(20, 50),
             Size = new Size(790, 45),
             ForeColor = Color.FromArgb(71, 85, 105)
@@ -490,7 +491,7 @@ public class MainForm : Form
         _lstBackupFolders = new ListBox
         {
             Location = new Point(20, 145),
-            Size = new Size(660, 235),
+            Size = new Size(660, 210),
             HorizontalScrollbar = true,
             Font = new Font("Consolas", 9.5f)
         };
@@ -518,10 +519,19 @@ public class MainForm : Form
             if (_lstBackupFolders.SelectedIndex >= 0) _lstBackupFolders.Items.RemoveAt(_lstBackupFolders.SelectedIndex);
         };
 
+        _chkBackupArchive = new CheckBox
+        {
+            Text = "Arşivleyerek yükle (önerilen) · klasör başına hızlı ZIP64",
+            Location = new Point(20, 370),
+            AutoSize = true,
+            Checked = true,
+            Font = new Font("Segoe UI", 9.0f, FontStyle.Bold)
+        };
+
         _lblBackupStatus = new Label
         {
             Text = "Hub yedekleme planı kontrol ediliyor...",
-            Location = new Point(20, 395),
+            Location = new Point(20, 405),
             Size = new Size(800, 45),
             ForeColor = Color.FromArgb(71, 85, 105)
         };
@@ -549,7 +559,7 @@ public class MainForm : Form
         {
             title, description, _chkBackupEnabled,
             _lstBackupFolders, _btnBackupAddFolder, _btnBackupRemoveFolder,
-            _lblBackupStatus, _btnBackupSave, safety
+            _chkBackupArchive, _lblBackupStatus, _btnBackupSave, safety
         });
         return tab;
     }
@@ -753,6 +763,7 @@ public class MainForm : Form
 
             foreach (var path in plan.Paths) _lstBackupFolders.Items.Add(path);
             _chkBackupEnabled.Checked = plan.Enabled;
+            _chkBackupArchive.Checked = plan.ArchiveEnabled;
             _lblBackupStatus.Text = plan.Configured
                 ? (plan.Ready ? "Hazır · Hub'daki YEDEKLE komutu bekleniyor." : plan.Message ?? "Plan kayıtlı; yedekleme şu an hazır değil.")
                 : "Önce Hub / Sunucular ekranında sunucu kaydını ve yedekleme klasörlerini yapılandırın.";
@@ -814,7 +825,8 @@ public class MainForm : Form
             var paths = _lstBackupFolders.Items.Cast<string>().ToArray();
             var (success, message) = await _backupService.SavePlanAsync(
                 _chkBackupEnabled.Checked,
-                paths);
+                paths,
+                _chkBackupArchive.Checked);
             _lblBackupStatus.Text = message;
             MessageBox.Show(message, success ? "Başarılı" : "Yedekleme", MessageBoxButtons.OK,
                 success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
