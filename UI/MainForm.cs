@@ -14,9 +14,7 @@ public class MainForm : Form
     private readonly HubClientService _hubClient;
     private readonly BackupService _backupService;
 
-    // Tray & Form controls
-    private NotifyIcon _trayIcon = null!;
-    private ContextMenuStrip _trayMenu = null!;
+    // Form controls. Continuous work runs only in the headless Windows service.
     private TabControl _tabControl = null!;
     
     // Top banner
@@ -24,7 +22,7 @@ public class MainForm : Form
     private Label _lblServerMeta = null!;
     private Label _lblStatusBadge = null!;
     private Button _btnScanNow = null!;
-    private Button _btnMinimizeToTray = null!;
+    private Button _btnCloseSettings = null!;
 
     // Dashboard controls
     private ListView _lvVolumes = null!;
@@ -52,12 +50,10 @@ public class MainForm : Form
     // Backup controls
     private CheckBox _chkBackupEnabled = null!;
     private ListBox _lstBackupFolders = null!;
-    private NumericUpDown _numBackupHour = null!;
     private Label _lblBackupStatus = null!;
     private Button _btnBackupAddFolder = null!;
     private Button _btnBackupRemoveFolder = null!;
     private Button _btnBackupSave = null!;
-    private Button _btnBackupRunNow = null!;
 
     // Service controls
     private Label _lblServiceStatus = null!;
@@ -98,24 +94,6 @@ public class MainForm : Form
         this.Font = new Font("Segoe UI", 9.25f, FontStyle.Regular);
         this.BackColor = Color.FromArgb(244, 246, 249);
         this.Icon = SystemIcons.Shield;
-
-        // Tray Icon setup
-        _trayMenu = new ContextMenuStrip();
-        _trayMenu.Items.Add("Göster (Dashboard)", null, (s, e) => ShowAndRestore());
-        _trayMenu.Items.Add("-");
-        _trayMenu.Items.Add("Şimdi Tara & Gönder", null, async (s, e) => await TriggerManualScan());
-        _trayMenu.Items.Add("Brevo Test E-postası", null, async (s, e) => await TriggerTestEmail());
-        _trayMenu.Items.Add("-");
-        _trayMenu.Items.Add("Çıkış", null, (s, e) => ExitApplication());
-
-        _trayIcon = new NotifyIcon
-        {
-            Icon = SystemIcons.Shield,
-            Text = "VDA Hub Server Controller",
-            Visible = true,
-            ContextMenuStrip = _trayMenu
-        };
-        _trayIcon.DoubleClick += (s, e) => ShowAndRestore();
 
         // 1. Top Banner
         var pnlHeader = new Panel
@@ -171,9 +149,9 @@ public class MainForm : Form
         _btnScanNow.FlatAppearance.BorderSize = 0;
         _btnScanNow.Click += async (s, e) => await TriggerManualScan();
 
-        _btnMinimizeToTray = new Button
+        _btnCloseSettings = new Button
         {
-            Text = "Arka Plana Al",
+            Text = "Ayarları Kapat",
             Size = new Size(110, 34),
             Location = new Point(745, 23),
             BackColor = Color.FromArgb(51, 65, 85),
@@ -182,10 +160,10 @@ public class MainForm : Form
             Cursor = Cursors.Hand,
             Anchor = AnchorStyles.Top | AnchorStyles.Right
         };
-        _btnMinimizeToTray.FlatAppearance.BorderSize = 0;
-        _btnMinimizeToTray.Click += (s, e) => MinimizeToTray();
+        _btnCloseSettings.FlatAppearance.BorderSize = 0;
+        _btnCloseSettings.Click += (s, e) => Close();
 
-        pnlHeader.Controls.AddRange(new Control[] { _lblServerTitle, _lblServerMeta, _lblStatusBadge, _btnScanNow, _btnMinimizeToTray });
+        pnlHeader.Controls.AddRange(new Control[] { _lblServerTitle, _lblServerMeta, _lblStatusBadge, _btnScanNow, _btnCloseSettings });
 
         // 2. Tab Control
         _tabControl = new TabControl
@@ -449,7 +427,7 @@ public class MainForm : Form
         };
         var description = new Label
         {
-            Text = "Bu sunucuda yedeklenecek klasörleri Windows klasör seçicisiyle belirleyin. Dosyalar Hub üzerinden geçmeden doğrudan Dropbox'a gider. Toplu şüpheli değişiklikte aktarım otomatik durur.",
+            Text = "Bu sunucuda yedeklenecek klasörleri Windows klasör seçicisiyle belirleyin. Yedek yalnız Hub'daki YEDEKLE komutuyla başlar ve yeni bir tarih klasörüne tüm dosyaları yükler.",
             Location = new Point(20, 50),
             Size = new Size(790, 45),
             ForeColor = Color.FromArgb(71, 85, 105)
@@ -461,16 +439,6 @@ public class MainForm : Form
             Location = new Point(20, 105),
             AutoSize = true,
             Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
-        };
-
-        var hourLabel = new Label { Text = "Günlük çalışma saati:", Location = new Point(480, 107), AutoSize = true };
-        _numBackupHour = new NumericUpDown
-        {
-            Location = new Point(620, 104),
-            Size = new Size(65, 25),
-            Minimum = 0,
-            Maximum = 23,
-            Value = 2
         };
 
         _lstBackupFolders = new ListBox
@@ -523,20 +491,9 @@ public class MainForm : Form
         };
         _btnBackupSave.Click += async (_, _) => await SaveBackupPlanAsync();
 
-        _btnBackupRunNow = new Button
-        {
-            Text = "▶ Şimdi Yedekle",
-            Location = new Point(270, 455),
-            Size = new Size(180, 42),
-            BackColor = Color.FromArgb(79, 70, 229),
-            ForeColor = Color.White,
-            FlatStyle = FlatStyle.Flat
-        };
-        _btnBackupRunNow.Click += async (_, _) => await RunBackupNowAsync();
-
         var safety = new Label
         {
-            Text = "Koruma: 500+ dosya, en az 100 dosyalık sette %15+ değişiklik veya 100+ şüpheli yeniden adlandırma görülürse yedekleme başlamadan durur. Kaynak silme Dropbox kopyasını silmez.",
+            Text = "Otomatik zamanlama ve otomatik silme yoktur. Koruma: 500+ dosya, en az 100 dosyalık sette %15+ değişiklik veya 100+ şüpheli yeniden adlandırma görülürse snapshot başlamadan durur.",
             Location = new Point(20, 520),
             Size = new Size(790, 50),
             ForeColor = Color.FromArgb(146, 64, 14)
@@ -544,9 +501,9 @@ public class MainForm : Form
 
         tab.Controls.AddRange(new Control[]
         {
-            title, description, _chkBackupEnabled, hourLabel, _numBackupHour,
+            title, description, _chkBackupEnabled,
             _lstBackupFolders, _btnBackupAddFolder, _btnBackupRemoveFolder,
-            _lblBackupStatus, _btnBackupSave, _btnBackupRunNow, safety
+            _lblBackupStatus, _btnBackupSave, safety
         });
         return tab;
     }
@@ -750,10 +707,9 @@ public class MainForm : Form
 
             foreach (var path in plan.Paths) _lstBackupFolders.Items.Add(path);
             _chkBackupEnabled.Checked = plan.Enabled;
-            _numBackupHour.Value = Math.Clamp(plan.RunHourLocal, 0, 23);
             _lblBackupStatus.Text = plan.Configured
-                ? (plan.Ready ? "Hazır · Dropbox bağlantısı ve sunucu planı aktif." : plan.Message ?? "Plan kayıtlı; yedekleme şu an hazır değil.")
-                : "Önce Hub / Sunucular ekranından bu sunucu için yeni kurulum paketi üretin.";
+                ? (plan.Ready ? "Hazır · Hub'daki YEDEKLE komutu bekleniyor." : plan.Message ?? "Plan kayıtlı; yedekleme şu an hazır değil.")
+                : "Önce Hub / Sunucular ekranında sunucu kaydını ve yedekleme klasörlerini yapılandırın.";
         }
         catch (Exception ex)
         {
@@ -782,8 +738,7 @@ public class MainForm : Form
             var paths = _lstBackupFolders.Items.Cast<string>().ToArray();
             var (success, message) = await _backupService.SavePlanAsync(
                 _chkBackupEnabled.Checked,
-                paths,
-                (int)_numBackupHour.Value);
+                paths);
             _lblBackupStatus.Text = message;
             MessageBox.Show(message, success ? "Başarılı" : "Yedekleme", MessageBoxButtons.OK,
                 success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
@@ -792,25 +747,6 @@ public class MainForm : Form
         finally
         {
             _btnBackupSave.Enabled = true;
-        }
-    }
-
-    private async Task RunBackupNowAsync()
-    {
-        _btnBackupRunNow.Enabled = false;
-        _lblBackupStatus.Text = "Yedekleme kontrol ediliyor...";
-        try
-        {
-            var result = await _backupService.RunIfDueAsync(force: true);
-            _lblBackupStatus.Text = result.Message;
-            MessageBox.Show(result.Message,
-                result.Success ? "Yedekleme tamamlandı" : (result.RequiresApproval ? "Güvenlik kilidi" : "Yedekleme hatası"),
-                MessageBoxButtons.OK,
-                result.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
-        }
-        finally
-        {
-            _btnBackupRunNow.Enabled = true;
         }
     }
 
@@ -1054,38 +990,4 @@ public class MainForm : Form
         RefreshServiceStatus();
     }
 
-    private void MinimizeToTray()
-    {
-        this.Hide();
-        _trayIcon.ShowBalloonTip(3000, "VDA Hub Server Controller", "Uygulama arka planda sistem tepsisinde çalışmaya devam ediyor.", ToolTipIcon.Info);
-    }
-
-    private void ShowAndRestore()
-    {
-        this.Show();
-        this.WindowState = FormWindowState.Normal;
-        this.BringToFront();
-    }
-
-    private void ExitApplication()
-    {
-        _trayIcon.Visible = false;
-        _trayIcon.Dispose();
-        Application.Exit();
-    }
-
-    protected override void OnFormClosing(FormClosingEventArgs e)
-    {
-        if (e.CloseReason == CloseReason.UserClosing)
-        {
-            e.Cancel = true;
-            MinimizeToTray();
-        }
-        else
-        {
-            _trayIcon.Visible = false;
-            _trayIcon.Dispose();
-            base.OnFormClosing(e);
-        }
-    }
 }

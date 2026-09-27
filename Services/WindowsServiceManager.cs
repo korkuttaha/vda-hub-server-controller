@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 
 namespace VdaHubServerController.Services;
 
@@ -15,6 +16,37 @@ public static class WindowsServiceManager
             ConfigService.EnsureProtectedInstallDirectory();
             var source = Path.GetFullPath(exePath);
             var installedExe = Path.Combine(ConfigService.InstallDirectory, "VdaHubServerController.exe");
+            var replacedPreviousService = false;
+
+            if (IsServiceInstalled())
+            {
+                var configuration = RunSc($"qc \"{ServiceName}\"");
+                if (!configuration.Success ||
+                    !configuration.Output.Contains("--service", StringComparison.OrdinalIgnoreCase) ||
+                    !(configuration.Output.Contains("VdaHubServerController.exe", StringComparison.OrdinalIgnoreCase) ||
+                      configuration.Output.Contains("vda-hub-server-controller.exe", StringComparison.OrdinalIgnoreCase)))
+                {
+                    return (false, "Aynı adlı fakat VDAKor ajanına ait olduğu doğrulanamayan bir servis bulundu; hiçbir değişiklik yapılmadı.");
+                }
+
+                if (File.Exists(installedExe) &&
+                    configuration.Output.Contains(installedExe, StringComparison.OrdinalIgnoreCase) &&
+                    (source.Equals(Path.GetFullPath(installedExe), StringComparison.OrdinalIgnoreCase) ||
+                     SHA256.HashData(File.ReadAllBytes(source)).SequenceEqual(SHA256.HashData(File.ReadAllBytes(installedExe)))))
+                {
+                    return (true, $"'{DisplayName}' güncel EXE ile zaten kurulu.");
+                }
+
+                StopService();
+                var deleted = RunSc($"delete \"{ServiceName}\"");
+                if (!deleted.Success) return (false, "Önceki VDAKor ajan servisi kaldırılamadı: " + deleted.Output);
+                var deadline = DateTime.UtcNow.AddSeconds(20);
+                while (IsServiceInstalled() && DateTime.UtcNow < deadline) Thread.Sleep(250);
+                if (IsServiceInstalled())
+                    return (false, "Önceki ajan servisi silinmeyi bekliyor. Hizmetler penceresini kapatıp yeniden deneyin.");
+                replacedPreviousService = true;
+            }
+
             if (!source.Equals(Path.GetFullPath(installedExe), StringComparison.OrdinalIgnoreCase))
                 File.Copy(source, installedExe, overwrite: true);
 
@@ -23,7 +55,8 @@ public static class WindowsServiceManager
             if (!res1.Success) return res1;
 
             RunSc($"description \"{ServiceName}\" \"{Description}\"");
-            return (true, $"'{DisplayName}' başarıyla {installedExe} konumuna kuruldu (Otomatik Başlatma).");
+            var prefix = replacedPreviousService ? "Önceki ajan servisi kaldırıldı; " : string.Empty;
+            return (true, $"{prefix}'{DisplayName}' {installedExe} konumuna kuruldu (Otomatik Başlatma).");
         }
         catch (Exception ex)
         {
@@ -39,7 +72,12 @@ public static class WindowsServiceManager
 
     public static (bool Success, string Output) StartService()
     {
-        return RunSc($"start \"{ServiceName}\"");
+        if (GetServiceStatus().StartsWith("Çalışıyor", StringComparison.Ordinal))
+            return (true, $"'{DisplayName}' zaten çalışıyor.");
+        var result = RunSc($"start \"{ServiceName}\"");
+        return result.Success || GetServiceStatus().StartsWith("Çalışıyor", StringComparison.Ordinal)
+            ? (true, result.Success ? result.Output : $"'{DisplayName}' çalışıyor.")
+            : result;
     }
 
     public static (bool Success, string Output) StopService()
