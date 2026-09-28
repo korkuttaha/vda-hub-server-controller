@@ -41,10 +41,12 @@ internal static class Program
 
         var executableName = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? string.Empty);
         var pcAgentUi = args.Contains("--pc-agent", StringComparer.OrdinalIgnoreCase) ||
-            executableName.Equals("VDAKorPcAgent", StringComparison.OrdinalIgnoreCase);
+            args.Contains("--reset", StringComparer.OrdinalIgnoreCase) ||
+            args.Contains("--re-enroll", StringComparer.OrdinalIgnoreCase) ||
+            executableName.StartsWith("VDAKorPcAgent", StringComparison.OrdinalIgnoreCase);
         if (pcAgentUi)
         {
-            return RunPcAgentUi();
+            return RunPcAgentUi(args);
         }
 
         // 3. Server Controller Windows Service Mode
@@ -189,7 +191,7 @@ internal static class Program
         return 0;
     }
 
-    private static int RunPcAgentUi()
+    private static int RunPcAgentUi(string[] args)
     {
         const string mutexName = "Global\\VDAKorPcAgent_UI_Mutex";
         using var mutex = new Mutex(true, mutexName, out var createdNew);
@@ -205,15 +207,41 @@ internal static class Program
 
         ApplicationConfiguration.Initialize();
         var config = new PcConfigService();
-        if (!PcEnrollmentService.IsEnrolled(config.Current))
+
+        var resetRequested = args.Contains("--reset", StringComparer.OrdinalIgnoreCase) ||
+            args.Contains("--re-enroll", StringComparer.OrdinalIgnoreCase);
+
+        if (resetRequested)
+        {
+            PcWindowsServiceManager.ResetService();
+            config.Reset();
+        }
+
+        var isEnrolled = PcEnrollmentService.IsEnrolled(config.Current);
+        if (!isEnrolled)
         {
             using var form = new PcEnrollmentForm(new PcEnrollmentService(config));
             if (form.ShowDialog() != DialogResult.OK)
                 return 1;
         }
+        else
+        {
+            using var statusForm = new PcStatusForm(config);
+            var statusResult = statusForm.ShowDialog();
+            if (statusResult == DialogResult.Retry)
+            {
+                using var form = new PcEnrollmentForm(new PcEnrollmentService(config));
+                if (form.ShowDialog() != DialogResult.OK)
+                    return 1;
+            }
+            else
+            {
+                return 0;
+            }
+        }
 
         var executable = Environment.ProcessPath ?? Application.ExecutablePath;
-        var (installed, installMessage) = PcWindowsServiceManager.InstallService(executable);
+        var (installed, installMessage) = PcWindowsServiceManager.InstallService(executable, forceRestart: true);
         if (!installed)
         {
             MessageBox.Show(installMessage, "PC Agent servisi kurulamadı", MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -273,8 +301,9 @@ Kullanım:
   VdaHubServerController.exe [seçenek]
 
 Kişisel PC modu:
-  VDAKorPcAgent.exe          : Hub > Bilgisayarlar koduyla kişisel PC eşleştirmesi.
+  VDAKorPcAgent.exe          : Hub > Bilgisayarlar koduyla kişisel PC eşleştirmesi veya durum ekranı.
   --pc-agent                : Aynı kişisel PC kurulum modunu açıkça başlatır.
+  --reset, --re-enroll      : Önceki servisi ve yapılandırmayı sıfırlayarak temiz eşleştirme ekranını açar.
   --pc-service              : VDAKor PC Agent Windows servisi (arka plan).
 
 Seçenekler:
