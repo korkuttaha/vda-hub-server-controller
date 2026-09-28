@@ -49,6 +49,8 @@ public sealed record BackupExecutionResult(
 public sealed class BackupService
 {
     private const string BackupProtocol = "3";
+    private const int DropboxUploadMaxAttempts = 6;
+    private const long ArchivePartTargetBytes = 8L * 1024 * 1024 * 1024;
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(10) };
     private readonly ConfigService _config;
     private readonly string _statePath;
@@ -81,7 +83,14 @@ public sealed class BackupService
         long ScannedLength,
         long ScannedLastWriteUtcTicks);
     private sealed record Change(string Path, CurrentFile Item, StateFile? Previous, string Kind);
-    private sealed record ArchiveArtifact(FileInfo File, IReadOnlyList<CurrentFile> SourceFiles);
+    private sealed record ArchiveArtifact(
+        FileInfo File,
+        IReadOnlyList<CurrentFile> SourceFiles,
+        string? RootLabel = null,
+        string? SourcePath = null,
+        int PartNumber = 1,
+        int PartCount = 1);
+    private sealed record DropboxErrorInfo(string Summary, long? CorrectOffset);
     private sealed record SkippedArchiveFile(CurrentFile Source, string Reason);
     private sealed record ArchiveBuildResult(
         IReadOnlyList<ArchiveArtifact> Artifacts,
@@ -292,7 +301,10 @@ public sealed class BackupService
 
             if (plan.ArchiveEnabled)
             {
-                temporaryRoot = CreateTemporaryRoot(command.RequestId, totalBytes);
+                temporaryRoot = CreateTemporaryRoot(
+                    command.RequestId,
+                    totalBytes,
+                    scan.Files.Values.Select(item => item.Root));
                 var lastCompressionProgressAtUtc = DateTime.MinValue;
                 async Task PushCompressionProgressAsync(int filesCompressed, long bytesCompressed, bool force)
                 {
@@ -568,19 +580,49 @@ public sealed class BackupService
         return new(true, false, message, filesScanned);
     }
 
-    private static string CreateTemporaryRoot(string requestId, long sourceBytes)
+    private static string CreateTemporaryRoot(
+        string requestId,
+        long sourceBytes,
+        IEnumerable<string> sourceRoots)
     {
-        var basePath = Path.Combine(Path.GetTempPath(), "VDAKor", "backups");
-        var rootPath = Path.GetPathRoot(Path.GetFullPath(basePath))
-            ?? throw new IOException("Geçici yedekleme diski belirlenemedi.");
-        var drive = new DriveInfo(rootPath);
         var safety = Math.Max(512L * 1024 * 1024, sourceBytes / 20);
         var required = sourceBytes > long.MaxValue - safety ? long.MaxValue : sourceBytes + safety;
-        if (drive.AvailableFreeSpace < required)
-            throw new IOException(
-                $"ZIP hazırlamak için geçici diskte yeterli boş alan yok. Gerekli: {FormatBytes(required)}, kullanılabilir: {FormatBytes(drive.AvailableFreeSpace)}.");
+        var candidates = new List<string>
+        {
+            Path.Combine(Path.GetTempPath(), "VDAKor", "backups")
+        };
+        foreach (var sourceRoot in sourceRoots.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var volumeRoot = Path.GetPathRoot(Path.GetFullPath(sourceRoot));
+            if (!string.IsNullOrWhiteSpace(volumeRoot))
+                candidates.Add(Path.Combine(volumeRoot, "VDAKor", "backups"));
+        }
 
-        Directory.CreateDirectory(basePath);
+        var inspected = new List<string>();
+        string? basePath = null;
+        foreach (var candidate in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var volumeRoot = Path.GetPathRoot(Path.GetFullPath(candidate));
+                if (string.IsNullOrWhiteSpace(volumeRoot)) continue;
+                var available = new DriveInfo(volumeRoot).AvailableFreeSpace;
+                inspected.Add($"{volumeRoot} {FormatBytes(available)}");
+                if (available < required) continue;
+                Directory.CreateDirectory(candidate);
+                basePath = candidate;
+                break;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                inspected.Add($"{candidate} kullanılamıyor");
+            }
+        }
+
+        if (basePath is null)
+            throw new IOException(
+                $"ZIP hazırlamak için uygun geçici diskte yeterli boş alan yok. Gerekli: {FormatBytes(required)}. Kontrol edilenler: {string.Join("; ", inspected)}.");
+
         foreach (var stale in new DirectoryInfo(basePath).EnumerateDirectories())
         {
             if (stale.Name.Length != 32 || !stale.Name.All(Uri.IsHexDigit) ||
@@ -621,126 +663,140 @@ public sealed class BackupService
 
         foreach (var group in groups)
         {
-            ct.ThrowIfCancellationRequested();
-            var archivePath = Path.Combine(temporaryRoot, group.RootLabel + ".zip");
-            var buildingPath = archivePath + ".building";
-            IReadOnlyList<CurrentFile> includedFiles;
-
-            while (true)
+            var parts = PartitionArchiveFiles(group.Files);
+            for (var partIndex = 0; partIndex < parts.Count; partIndex++)
             {
                 ct.ThrowIfCancellationRequested();
-                foreach (var item in group.Files.Where(item => !skipped.ContainsKey(item.File.FullName)))
-                {
-                    if (!TryReadCurrentMetadata(item, out var reason))
-                    {
-                        skipped[item.File.FullName] = new(item, reason);
-                        progressFiles.Add(item.File.FullName);
-                    }
-                }
+                var partFiles = parts[partIndex];
+                var archiveName = parts.Count == 1
+                    ? group.RootLabel + ".zip"
+                    : $"{group.RootLabel}-part-{partIndex + 1:000}.zip";
+                var archivePath = Path.Combine(temporaryRoot, archiveName);
+                var buildingPath = archivePath + ".building";
+                IReadOnlyList<CurrentFile> includedFiles;
 
-                includedFiles = group.Files
-                    .Where(item => !skipped.ContainsKey(item.File.FullName))
-                    .ToArray();
-                if (File.Exists(buildingPath)) File.Delete(buildingPath);
-                var retry = false;
-                long attemptBytes = 0;
-                try
+                while (true)
                 {
-                    await using (var archiveStream = new FileStream(
-                                     buildingPath,
-                                     FileMode.CreateNew,
-                                     FileAccess.ReadWrite,
-                                     FileShare.None,
-                                     buffer.Length,
-                                     true))
-                    using (var archive = new ZipArchive(archiveStream, ZipArchiveMode.Create, leaveOpen: false))
+                    ct.ThrowIfCancellationRequested();
+                    foreach (var item in partFiles.Where(item => !skipped.ContainsKey(item.File.FullName)))
                     {
-                        foreach (var item in includedFiles)
+                        if (!TryReadCurrentMetadata(item, out var reason))
                         {
-                            ct.ThrowIfCancellationRequested();
-                            if (!TryReadCurrentMetadata(item, out var reason))
-                                throw new UnstableArchiveFileException(item, reason);
-
-                            var entry = archive.CreateEntry(item.Relative.Replace('\\', '/'), CompressionLevel.Fastest);
-                            FileStream source;
-                            try
-                            {
-                                source = new FileStream(
-                                    item.File.FullName,
-                                    FileMode.Open,
-                                    FileAccess.Read,
-                                    FileShare.ReadWrite | FileShare.Delete,
-                                    buffer.Length,
-                                    true);
-                            }
-                            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                            {
-                                throw new UnstableArchiveFileException(
-                                    item,
-                                    "Dosya sıkıştırma sırasında okunamadı: " + ex.Message);
-                            }
-                            await using (source)
-                            {
-                                await using var destination = entry.Open();
-                                var remaining = item.ScannedLength;
-                                while (remaining > 0)
-                                {
-                                    var requested = (int)Math.Min(buffer.Length, remaining);
-                                    int read;
-                                    try
-                                    {
-                                        read = await source.ReadAsync(buffer.AsMemory(0, requested), ct);
-                                    }
-                                    catch (IOException ex)
-                                    {
-                                        throw new UnstableArchiveFileException(
-                                            item,
-                                            "Dosya sıkıştırma sırasında okunamadı: " + ex.Message);
-                                    }
-                                    if (read == 0)
-                                        throw new UnstableArchiveFileException(
-                                            item,
-                                            "Dosya sıkıştırma sırasında küçüldü veya kullanılamaz oldu.");
-                                    await destination.WriteAsync(buffer.AsMemory(0, read), ct);
-                                    remaining -= read;
-                                    attemptBytes += read;
-                                    progressBytesHighWater = Math.Min(
-                                        sourceBytes,
-                                        Math.Max(progressBytesHighWater, committedBytes + attemptBytes));
-                                    await progress(progressFiles.Count, progressBytesHighWater, false);
-                                }
-                            }
-
-                            if (!TryReadCurrentMetadata(item, out reason))
-                                throw new UnstableArchiveFileException(item, reason);
+                            skipped[item.File.FullName] = new(item, reason);
                             progressFiles.Add(item.File.FullName);
-                            await progress(progressFiles.Count, progressBytesHighWater, false);
                         }
                     }
-                }
-                catch (UnstableArchiveFileException ex)
-                {
-                    skipped[ex.FileItem.File.FullName] = new(ex.FileItem, ex.Message);
-                    progressFiles.Add(ex.FileItem.File.FullName);
-                    retry = true;
-                }
 
-                if (retry)
-                {
+                    includedFiles = partFiles
+                        .Where(item => !skipped.ContainsKey(item.File.FullName))
+                        .ToArray();
                     if (File.Exists(buildingPath)) File.Delete(buildingPath);
-                    continue;
-                }
+                    var retry = false;
+                    long attemptBytes = 0;
+                    try
+                    {
+                        await using (var archiveStream = new FileStream(
+                                         buildingPath,
+                                         FileMode.CreateNew,
+                                         FileAccess.ReadWrite,
+                                         FileShare.None,
+                                         buffer.Length,
+                                         true))
+                        using (var archive = new ZipArchive(archiveStream, ZipArchiveMode.Create, leaveOpen: false))
+                        {
+                            foreach (var item in includedFiles)
+                            {
+                                ct.ThrowIfCancellationRequested();
+                                if (!TryReadCurrentMetadata(item, out var reason))
+                                    throw new UnstableArchiveFileException(item, reason);
 
-                using (var verification = ZipFile.OpenRead(buildingPath))
-                {
-                    if (verification.Entries.Count != includedFiles.Count)
-                        throw new InvalidDataException($"ZIP doğrulaması başarısız: {archivePath}");
+                                var entry = archive.CreateEntry(item.Relative.Replace('\\', '/'), CompressionLevel.Fastest);
+                                FileStream source;
+                                try
+                                {
+                                    source = new FileStream(
+                                        item.File.FullName,
+                                        FileMode.Open,
+                                        FileAccess.Read,
+                                        FileShare.ReadWrite | FileShare.Delete,
+                                        buffer.Length,
+                                        true);
+                                }
+                                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                                {
+                                    throw new UnstableArchiveFileException(
+                                        item,
+                                        "Dosya sıkıştırma sırasında okunamadı: " + ex.Message);
+                                }
+                                await using (source)
+                                {
+                                    await using var destination = entry.Open();
+                                    var remaining = item.ScannedLength;
+                                    while (remaining > 0)
+                                    {
+                                        var requested = (int)Math.Min(buffer.Length, remaining);
+                                        int read;
+                                        try
+                                        {
+                                            read = await source.ReadAsync(buffer.AsMemory(0, requested), ct);
+                                        }
+                                        catch (IOException ex)
+                                        {
+                                            throw new UnstableArchiveFileException(
+                                                item,
+                                                "Dosya sıkıştırma sırasında okunamadı: " + ex.Message);
+                                        }
+                                        if (read == 0)
+                                            throw new UnstableArchiveFileException(
+                                                item,
+                                                "Dosya sıkıştırma sırasında küçüldü veya kullanılamaz oldu.");
+                                        await destination.WriteAsync(buffer.AsMemory(0, read), ct);
+                                        remaining -= read;
+                                        attemptBytes += read;
+                                        progressBytesHighWater = Math.Min(
+                                            sourceBytes,
+                                            Math.Max(progressBytesHighWater, committedBytes + attemptBytes));
+                                        await progress(progressFiles.Count, progressBytesHighWater, false);
+                                    }
+                                }
+
+                                if (!TryReadCurrentMetadata(item, out reason))
+                                    throw new UnstableArchiveFileException(item, reason);
+                                progressFiles.Add(item.File.FullName);
+                                await progress(progressFiles.Count, progressBytesHighWater, false);
+                            }
+                        }
+                    }
+                    catch (UnstableArchiveFileException ex)
+                    {
+                        skipped[ex.FileItem.File.FullName] = new(ex.FileItem, ex.Message);
+                        progressFiles.Add(ex.FileItem.File.FullName);
+                        retry = true;
+                    }
+
+                    if (retry)
+                    {
+                        if (File.Exists(buildingPath)) File.Delete(buildingPath);
+                        continue;
+                    }
+
+                    using (var verification = ZipFile.OpenRead(buildingPath))
+                    {
+                        if (verification.Entries.Count != includedFiles.Count)
+                            throw new InvalidDataException($"ZIP doğrulaması başarısız: {archivePath}");
+                    }
+                    File.Move(buildingPath, archivePath, true);
+                    committedBytes += includedFiles.Sum(item => item.ScannedLength);
+                    break;
                 }
-                File.Move(buildingPath, archivePath, true);
-                committedBytes += includedFiles.Sum(item => item.ScannedLength);
-                break;
+                artifacts.Add(new ArchiveArtifact(
+                    new FileInfo(archivePath),
+                    includedFiles,
+                    group.RootLabel,
+                    group.Files.FirstOrDefault()?.Root,
+                    partIndex + 1,
+                    parts.Count));
             }
-            artifacts.Add(new ArchiveArtifact(new FileInfo(archivePath), includedFiles));
         }
 
         var manifestPath = Path.Combine(temporaryRoot, "manifest.json");
@@ -750,12 +806,14 @@ public sealed class BackupService
             command.RequestId,
             command.SnapshotFolder,
             createdAtUtc = DateTime.UtcNow,
-            archives = groups.Select(group => new
+            archives = artifacts.Where(artifact => artifact.File.Extension.Equals(".zip", StringComparison.OrdinalIgnoreCase)).Select(artifact => new
             {
-                fileName = group.RootLabel + ".zip",
-                group.RootLabel,
-                sourcePath = group.Files.FirstOrDefault()?.Root,
-                files = group.Files.Where(item => !skipped.ContainsKey(item.File.FullName)).Select(item => new
+                fileName = artifact.File.Name,
+                artifact.RootLabel,
+                artifact.SourcePath,
+                artifact.PartNumber,
+                artifact.PartCount,
+                files = artifact.SourceFiles.Select(item => new
                 {
                     path = item.Relative.Replace('\\', '/'),
                     size = item.ScannedLength,
@@ -776,6 +834,28 @@ public sealed class BackupService
             ct);
         artifacts.Add(new ArchiveArtifact(new FileInfo(manifestPath), []));
         return new ArchiveBuildResult(artifacts, skipped.Values.ToArray());
+    }
+
+    private static IReadOnlyList<IReadOnlyList<CurrentFile>> PartitionArchiveFiles(IReadOnlyList<CurrentFile> files)
+    {
+        var parts = new List<IReadOnlyList<CurrentFile>>();
+        var current = new List<CurrentFile>();
+        long currentBytes = 0;
+        foreach (var item in files)
+        {
+            if (current.Count > 0 && currentBytes > ArchivePartTargetBytes - Math.Min(item.ScannedLength, ArchivePartTargetBytes))
+            {
+                parts.Add(current.ToArray());
+                current = [];
+                currentBytes = 0;
+            }
+            current.Add(item);
+            currentBytes = currentBytes > long.MaxValue - item.ScannedLength
+                ? long.MaxValue
+                : currentBytes + item.ScannedLength;
+        }
+        if (current.Count > 0) parts.Add(current.ToArray());
+        return parts;
     }
 
     private static bool TryReadCurrentMetadata(CurrentFile item, out string reason)
@@ -1089,22 +1169,26 @@ public sealed class BackupService
         await using var stream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, chunkSize, true);
         var buffer = new byte[chunkSize];
         var first = await ReadChunkAsync(stream, buffer, ct);
-        using var start = await DropboxContentAsync(
+        using var start = await DropboxContentWithRetryAsync(
             "https://content.dropboxapi.com/2/files/upload_session/start",
             accessToken,
             new { close = false },
             buffer,
             first,
+            "Dropbox yükleme oturumu başlatılamadı",
             ct);
-        if (!start.IsSuccessStatusCode) throw new IOException($"Dropbox oturumu başlatılamadı: {file.FullName}");
+        if (!start.IsSuccessStatusCode)
+            throw await DropboxFailureAsync("Dropbox oturumu başlatılamadı", file, start, ct);
         using var startDoc = JsonDocument.Parse(await start.Content.ReadAsStringAsync(ct));
         var sessionId = startDoc.RootElement.GetProperty("session_id").GetString()
             ?? throw new IOException("Dropbox session id eksik.");
         long offset = first;
         await progress(offset);
+        var reconciliationAttempts = 0;
 
         while (offset < initialLength)
         {
+            stream.Position = offset;
             var count = await ReadChunkAsync(stream, buffer, ct);
             if (count <= 0) throw new EndOfStreamException(file.FullName);
             var final = offset + count >= initialLength;
@@ -1118,9 +1202,58 @@ public sealed class BackupService
             var url = final
                 ? "https://content.dropboxapi.com/2/files/upload_session/finish"
                 : "https://content.dropboxapi.com/2/files/upload_session/append_v2";
-            using var response = await DropboxContentAsync(url, accessToken, arg, buffer, count, ct);
-            if (!response.IsSuccessStatusCode) throw new IOException($"Dropbox yüklemesi başarısız: {file.FullName}");
-            offset += count;
+            HttpResponseMessage response;
+            try
+            {
+                response = await DropboxContentWithRetryAsync(
+                    url,
+                    accessToken,
+                    arg,
+                    buffer,
+                    count,
+                    $"Dropbox yüklemesi {FormatBytes(offset)} konumunda kesildi",
+                    ct);
+            }
+            catch (IOException)
+            {
+                if (final && await DropboxFileMatchesLengthAsync(remotePath, initialLength, accessToken, ct))
+                {
+                    offset = initialLength;
+                    await progress(offset);
+                    break;
+                }
+                throw;
+            }
+            using (response)
+            {
+                if (response.IsSuccessStatusCode)
+                {
+                    offset += count;
+                    reconciliationAttempts = 0;
+                }
+                else
+                {
+                    var error = await ReadDropboxErrorAsync(response, ct);
+                    if (error.CorrectOffset is { } correctOffset &&
+                        correctOffset >= 0 && correctOffset <= initialLength)
+                    {
+                        reconciliationAttempts++;
+                        if (reconciliationAttempts > 3)
+                            throw new IOException(
+                                $"Dropbox yükleme konumu üç denemede uzlaştırılamadı: {file.FullName}");
+                        offset = correctOffset;
+                    }
+                    else if (final && await DropboxFileMatchesLengthAsync(remotePath, initialLength, accessToken, ct))
+                    {
+                        offset = initialLength;
+                    }
+                    else
+                    {
+                        throw new IOException(
+                            $"Dropbox yüklemesi başarısız: {file.FullName} (HTTP {(int)response.StatusCode}: {error.Summary})");
+                    }
+                }
+            }
             await progress(offset);
         }
 
@@ -1131,14 +1264,30 @@ public sealed class BackupService
                 cursor = new { session_id = sessionId, offset },
                 commit = new { path = remotePath, mode = "overwrite", autorename = false, mute = true, strict_conflict = false }
             };
-            using var response = await DropboxContentAsync(
-                "https://content.dropboxapi.com/2/files/upload_session/finish",
-                accessToken,
-                arg,
-                [],
-                0,
-                ct);
-            if (!response.IsSuccessStatusCode) throw new IOException($"Dropbox yüklemesi tamamlanamadı: {file.FullName}");
+            HttpResponseMessage? response = null;
+            try
+            {
+                response = await DropboxContentWithRetryAsync(
+                    "https://content.dropboxapi.com/2/files/upload_session/finish",
+                    accessToken,
+                    arg,
+                    [],
+                    0,
+                    "Dropbox yüklemesi tamamlanamadı",
+                    ct);
+                if (!response.IsSuccessStatusCode &&
+                    !await DropboxFileMatchesLengthAsync(remotePath, initialLength, accessToken, ct))
+                    throw await DropboxFailureAsync("Dropbox yüklemesi tamamlanamadı", file, response, ct);
+            }
+            catch (IOException)
+            {
+                if (!await DropboxFileMatchesLengthAsync(remotePath, initialLength, accessToken, ct))
+                    throw;
+            }
+            finally
+            {
+                response?.Dispose();
+            }
             await progress(offset);
         }
 
@@ -1187,6 +1336,144 @@ public sealed class BackupService
         request.Content = new ByteArrayContent(buffer, 0, count);
         request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
         return await Http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+    }
+
+    private static async Task<HttpResponseMessage> DropboxContentWithRetryAsync(
+        string url,
+        string accessToken,
+        object arg,
+        byte[] buffer,
+        int count,
+        string operation,
+        CancellationToken ct)
+    {
+        Exception? lastException = null;
+        for (var attempt = 1; attempt <= DropboxUploadMaxAttempts; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                var response = await DropboxContentAsync(url, accessToken, arg, buffer, count, ct);
+                if (response.IsSuccessStatusCode || !IsTransientDropboxStatus(response.StatusCode) ||
+                    attempt == DropboxUploadMaxAttempts)
+                    return response;
+
+                var delay = DropboxRetryDelay(response, attempt);
+                response.Dispose();
+                await Task.Delay(delay, ct);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                lastException = new TimeoutException("Dropbox isteği zaman aşımına uğradı.");
+                if (attempt == DropboxUploadMaxAttempts) break;
+                await Task.Delay(DropboxRetryDelay(null, attempt), ct);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException)
+            {
+                lastException = ex;
+                if (attempt == DropboxUploadMaxAttempts) break;
+                await Task.Delay(DropboxRetryDelay(null, attempt), ct);
+            }
+        }
+
+        throw new IOException(
+            $"{operation}; {DropboxUploadMaxAttempts} denemeden sonra bağlantı kurulamadı: {lastException?.GetBaseException().Message}",
+            lastException);
+    }
+
+    private static bool IsTransientDropboxStatus(HttpStatusCode status) =>
+        status is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests || (int)status >= 500;
+
+    private static TimeSpan DropboxRetryDelay(HttpResponseMessage? response, int attempt)
+    {
+        var retryAfter = response?.Headers.RetryAfter?.Delta;
+        if (retryAfter is { } requested && requested > TimeSpan.Zero)
+            return requested > TimeSpan.FromSeconds(60) ? TimeSpan.FromSeconds(60) : requested;
+        return TimeSpan.FromSeconds(Math.Min(30, 1 << Math.Min(attempt, 5)));
+    }
+
+    private static async Task<DropboxErrorInfo> ReadDropboxErrorAsync(
+        HttpResponseMessage response,
+        CancellationToken ct)
+    {
+        var raw = await response.Content.ReadAsStringAsync(ct);
+        if (string.IsNullOrWhiteSpace(raw))
+            return new DropboxErrorInfo(response.ReasonPhrase ?? "Dropbox hatası", null);
+        try
+        {
+            using var document = JsonDocument.Parse(raw);
+            var root = document.RootElement;
+            var summary = root.TryGetProperty("error_summary", out var summaryElement)
+                ? summaryElement.GetString() ?? raw
+                : raw;
+            return new DropboxErrorInfo(summary, FindCorrectOffset(root));
+        }
+        catch (JsonException)
+        {
+            return new DropboxErrorInfo(raw, null);
+        }
+    }
+
+    private static long? FindCorrectOffset(JsonElement element)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                if (property.NameEquals("correct_offset") && property.Value.TryGetInt64(out var value))
+                    return value;
+                var nested = FindCorrectOffset(property.Value);
+                if (nested.HasValue) return nested;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                var nested = FindCorrectOffset(item);
+                if (nested.HasValue) return nested;
+            }
+        }
+        return null;
+    }
+
+    private static async Task<IOException> DropboxFailureAsync(
+        string operation,
+        FileInfo file,
+        HttpResponseMessage response,
+        CancellationToken ct)
+    {
+        var error = await ReadDropboxErrorAsync(response, ct);
+        return new IOException($"{operation}: {file.FullName} (HTTP {(int)response.StatusCode}: {error.Summary})");
+    }
+
+    private static async Task<bool> DropboxFileMatchesLengthAsync(
+        string remotePath,
+        long expectedLength,
+        string accessToken,
+        CancellationToken ct)
+    {
+        try
+        {
+            using var response = await DropboxJsonAsync(
+                "https://api.dropboxapi.com/2/files/get_metadata",
+                accessToken,
+                new { path = remotePath, include_media_info = false, include_deleted = false },
+                ct);
+            if (!response.IsSuccessStatusCode) return false;
+            using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            return document.RootElement.TryGetProperty(".tag", out var tag) && tag.GetString() == "file" &&
+                   document.RootElement.TryGetProperty("size", out var size) && size.TryGetInt64(out var length) &&
+                   length == expectedLength;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private State LoadState()
