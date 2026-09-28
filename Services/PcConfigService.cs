@@ -91,4 +91,20 @@ public sealed class PcConfigService
             }
         }
     }
+
+    public void Reset()
+    {
+        lock (Gate)
+        {
+            _current = new PcAgentConfig();
+            try
+            {
+                if (File.Exists(_path)) File.Delete(_path);
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[PcConfig] Config silinemedi: {ex.Message}");
+            }
+        }
+    }
 }

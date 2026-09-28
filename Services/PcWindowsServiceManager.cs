@@ -9,7 +9,7 @@ public static class PcWindowsServiceManager
     public const string DisplayName = "VDAKor PC Agent";
     public const string Description = "Kişisel Windows bilgisayarını VDAKor Hub ile güvenli biçimde eşleştirir ve izin verilen güç komutlarını çalıştırır.";
 
-    public static (bool Success, string Output) InstallService(string exePath)
+    public static (bool Success, string Output) InstallService(string exePath, bool forceRestart = false)
     {
         try
         {
@@ -24,11 +24,14 @@ public static class PcWindowsServiceManager
                     !configuration.Output.Contains("--pc-service", StringComparison.OrdinalIgnoreCase))
                     return (false, "Aynı adlı fakat VDAKor PC Agent'a ait olduğu doğrulanamayan bir servis bulundu.");
 
-                if (File.Exists(installedExe) &&
+                if (!forceRestart &&
+                    File.Exists(installedExe) &&
                     configuration.Output.Contains(installedExe, StringComparison.OrdinalIgnoreCase) &&
                     (source.Equals(Path.GetFullPath(installedExe), StringComparison.OrdinalIgnoreCase) ||
                      SHA256.HashData(File.ReadAllBytes(source)).SequenceEqual(SHA256.HashData(File.ReadAllBytes(installedExe)))))
+                {
                     return (true, $"'{DisplayName}' güncel EXE ile zaten kurulu.");
+                }
 
                 StopService();
                 var deleted = RunSc($"delete \"{ServiceName}\"");
@@ -66,6 +69,27 @@ public static class PcWindowsServiceManager
     {
         StopService();
         return RunSc($"delete \"{ServiceName}\"");
+    }
+
+    public static (bool Success, string Output) ResetService()
+    {
+        try
+        {
+            StopService();
+            if (IsServiceInstalled())
+            {
+                var deleted = RunSc($"delete \"{ServiceName}\"");
+                var deadline = DateTime.UtcNow.AddSeconds(20);
+                while (IsServiceInstalled() && DateTime.UtcNow < deadline) Thread.Sleep(250);
+                if (IsServiceInstalled())
+                    return (false, "Önceki PC Agent servisi silinemedi: " + deleted.Output);
+            }
+            return (true, "Önceki PC Agent servisi başarıyla durduruldu ve kaldırıldı.");
+        }
+        catch (Exception ex)
+        {
+            return (false, "Servis sıfırlanamadı: " + ex.Message);
+        }
     }
 
     public static bool IsServiceInstalled()
