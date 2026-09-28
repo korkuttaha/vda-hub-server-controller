@@ -49,7 +49,7 @@ public sealed record BackupExecutionResult(
 public sealed class BackupService
 {
     private const string BackupProtocol = "3";
-    private const int DropboxUploadMaxAttempts = 6;
+    private const int DropboxUploadMaxAttempts = 20;
     private const long ArchivePartTargetBytes = 8L * 1024 * 1024 * 1024;
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(10) };
     private readonly ConfigService _config;
@@ -90,15 +90,62 @@ public sealed class BackupService
         string? SourcePath = null,
         int PartNumber = 1,
         int PartCount = 1);
-    private sealed record DropboxErrorInfo(string Summary, long? CorrectOffset);
+    private sealed record DropboxErrorInfo(string Summary, long? CorrectOffset, bool SessionNotFound);
     private sealed record SkippedArchiveFile(CurrentFile Source, string Reason);
     private sealed record ArchiveBuildResult(
         IReadOnlyList<ArchiveArtifact> Artifacts,
         IReadOnlyList<SkippedArchiveFile> SkippedFiles);
     private sealed class BackupStopRequestedException : OperationCanceledException { }
+    private sealed class DropboxUploadSessionExpiredException(string message) : IOException(message) { }
     private sealed class UnstableArchiveFileException(CurrentFile source, string reason) : IOException(reason)
     {
         public CurrentFile FileItem { get; } = source;
+    }
+
+    private sealed class PreparedArchiveState
+    {
+        public string RequestId { get; set; } = string.Empty;
+        public string SnapshotFolder { get; set; } = string.Empty;
+        public List<PreparedArchiveArtifact> Artifacts { get; set; } = [];
+        public List<PreparedSourceFile> Sources { get; set; } = [];
+    }
+
+    private sealed class PreparedArchiveArtifact
+    {
+        public string FileName { get; set; } = string.Empty;
+        public long Length { get; set; }
+        public long LastWriteUtcTicks { get; set; }
+        public List<string> SourcePaths { get; set; } = [];
+        public string? RootLabel { get; set; }
+        public string? SourcePath { get; set; }
+        public int PartNumber { get; set; } = 1;
+        public int PartCount { get; set; } = 1;
+    }
+
+    private sealed class PreparedSourceFile
+    {
+        public string Path { get; set; } = string.Empty;
+        public long Length { get; set; }
+        public long LastWriteUtcTicks { get; set; }
+        public bool Skipped { get; set; }
+        public string? SkipReason { get; set; }
+    }
+
+    private sealed class UploadCheckpointState
+    {
+        public string RequestId { get; set; } = string.Empty;
+        public List<UploadArtifactCheckpoint> Artifacts { get; set; } = [];
+    }
+
+    private sealed class UploadArtifactCheckpoint
+    {
+        public string RemotePath { get; set; } = string.Empty;
+        public string FileName { get; set; } = string.Empty;
+        public long FileLength { get; set; }
+        public long LastWriteUtcTicks { get; set; }
+        public string? SessionId { get; set; }
+        public long Offset { get; set; }
+        public bool Completed { get; set; }
     }
 
     public BackupService(ConfigService config)
@@ -165,6 +212,7 @@ public sealed class BackupService
         string? cleanupStagingRoot = null;
         string? temporaryRoot = null;
         string? activeRequestId = null;
+        var preserveTemporaryRoot = false;
         var filesScannedForResult = 0;
         var filesUploadedForResult = 0;
         long bytesUploadedForResult = 0;
@@ -331,12 +379,22 @@ public sealed class BackupService
                         totalBytes,
                         ct))
                     throw new BackupStopRequestedException();
-                var archiveBuild = await CreateArchivesAsync(
-                    scan.Files.Values,
-                    temporaryRoot,
-                    command,
-                    PushCompressionProgressAsync,
-                    ct);
+                ArchiveBuildResult archiveBuild;
+                if (TryLoadPreparedArchives(temporaryRoot, command, scan.Files.Values, out var prepared))
+                {
+                    archiveBuild = prepared;
+                }
+                else
+                {
+                    ResetTemporaryRoot(temporaryRoot);
+                    archiveBuild = await CreateArchivesAsync(
+                        scan.Files.Values,
+                        temporaryRoot,
+                        command,
+                        PushCompressionProgressAsync,
+                        ct);
+                    SavePreparedArchives(temporaryRoot, command, scan.Files.Values, archiveBuild);
+                }
                 var artifacts = archiveBuild.Artifacts;
                 skippedArchiveFiles = archiveBuild.SkippedFiles;
                 var skippedPaths = skippedArchiveFiles
@@ -374,31 +432,24 @@ public sealed class BackupService
                         throw new BackupStopRequestedException();
                 }
 
+                var uploadCheckpointPath = Path.Combine(temporaryRoot, "upload-checkpoint.json");
+                var uploadCheckpoint = LoadUploadCheckpoint(uploadCheckpointPath, command.RequestId);
                 foreach (var artifact in artifacts)
                 {
-                    try
-                    {
-                        await UploadAsync(
-                            artifact.File,
-                            $"{stagingRoot}/{artifact.File.Name}",
-                            accessToken,
-                            chunkSize,
-                            currentArchiveBytes => PushArchiveProgressAsync(currentArchiveBytes),
-                            ct);
-                        filesUploaded += artifact.SourceFiles.Count;
-                        bytesUploaded += artifact.File.Length;
-                        filesUploadedForResult = filesUploaded;
-                        bytesUploadedForResult = bytesUploaded;
-                        await PushArchiveProgressAsync(0);
-                    }
-                    catch (BackupStopRequestedException)
-                    {
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        errors.Add(ex.Message);
-                    }
+                    await UploadAsync(
+                        artifact.File,
+                        $"{stagingRoot}/{artifact.File.Name}",
+                        accessToken,
+                        chunkSize,
+                        uploadCheckpoint,
+                        uploadCheckpointPath,
+                        currentArchiveBytes => PushArchiveProgressAsync(currentArchiveBytes),
+                        ct);
+                    filesUploaded += artifact.SourceFiles.Count;
+                    bytesUploaded += artifact.File.Length;
+                    filesUploadedForResult = filesUploaded;
+                    bytesUploadedForResult = bytesUploaded;
+                    await PushArchiveProgressAsync(0);
                 }
                 await PushArchiveProgressAsync(0, true);
             }
@@ -434,6 +485,8 @@ public sealed class BackupService
                             remotePath,
                             accessToken,
                             chunkSize,
+                            null,
+                            null,
                             currentFileBytes => PushProgressAsync(currentFileBytes),
                             ct);
                         filesUploaded++;
@@ -563,9 +616,14 @@ public sealed class BackupService
                 filesUploadedForResult,
                 bytesUploadedForResult);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            preserveTemporaryRoot = true;
+            throw;
+        }
         finally
         {
-            DeleteTemporaryRoot(temporaryRoot);
+            if (!preserveTemporaryRoot) DeleteTemporaryRoot(temporaryRoot);
             _gate.Release();
         }
     }
@@ -600,8 +658,16 @@ public sealed class BackupService
 
         var inspected = new List<string>();
         string? basePath = null;
-        foreach (var candidate in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+        var distinctCandidates = candidates.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        foreach (var candidate in distinctCandidates)
         {
+            if (!Directory.Exists(Path.Combine(candidate, requestId))) continue;
+            basePath = candidate;
+            break;
+        }
+        foreach (var candidate in distinctCandidates)
+        {
+            if (basePath is not null) break;
             try
             {
                 var volumeRoot = Path.GetPathRoot(Path.GetFullPath(candidate));
@@ -625,14 +691,20 @@ public sealed class BackupService
 
         foreach (var stale in new DirectoryInfo(basePath).EnumerateDirectories())
         {
-            if (stale.Name.Length != 32 || !stale.Name.All(Uri.IsHexDigit) ||
-                stale.LastWriteTimeUtc >= DateTime.UtcNow.AddDays(-1)) continue;
+            if (string.Equals(stale.Name, requestId, StringComparison.OrdinalIgnoreCase) ||
+                stale.Name.Length != 32 || !stale.Name.All(Uri.IsHexDigit) ||
+                stale.LastWriteTimeUtc >= DateTime.UtcNow.AddDays(-8)) continue;
             try { stale.Delete(true); } catch { }
         }
         var temporaryRoot = Path.Combine(basePath, requestId);
-        if (Directory.Exists(temporaryRoot)) Directory.Delete(temporaryRoot, true);
         Directory.CreateDirectory(temporaryRoot);
         return temporaryRoot;
+    }
+
+    private static void ResetTemporaryRoot(string temporaryRoot)
+    {
+        if (Directory.Exists(temporaryRoot)) Directory.Delete(temporaryRoot, true);
+        Directory.CreateDirectory(temporaryRoot);
     }
 
     private static async Task<ArchiveBuildResult> CreateArchivesAsync(
@@ -834,6 +906,172 @@ public sealed class BackupService
             ct);
         artifacts.Add(new ArchiveArtifact(new FileInfo(manifestPath), []));
         return new ArchiveBuildResult(artifacts, skipped.Values.ToArray());
+    }
+
+    private static bool TryLoadPreparedArchives(
+        string temporaryRoot,
+        ManualBackupRequest command,
+        IEnumerable<CurrentFile> files,
+        out ArchiveBuildResult result)
+    {
+        result = new ArchiveBuildResult([], []);
+        var statePath = Path.Combine(temporaryRoot, "prepared-archives.json");
+        if (!File.Exists(statePath)) return false;
+        try
+        {
+            var state = JsonSerializer.Deserialize<PreparedArchiveState>(File.ReadAllText(statePath), JsonOptions());
+            if (state is null ||
+                !string.Equals(state.RequestId, command.RequestId, StringComparison.Ordinal) ||
+                !string.Equals(state.SnapshotFolder, command.SnapshotFolder, StringComparison.Ordinal) ||
+                state.Artifacts is null || state.Sources is null)
+                return false;
+
+            var current = files.ToDictionary(item => item.File.FullName, StringComparer.OrdinalIgnoreCase);
+            var preparedSources = state.Sources.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
+            if (current.Count != preparedSources.Count) return false;
+            foreach (var pair in current)
+            {
+                if (!preparedSources.TryGetValue(pair.Key, out var source) ||
+                    source.Length != pair.Value.ScannedLength ||
+                    source.LastWriteUtcTicks != pair.Value.ScannedLastWriteUtcTicks ||
+                    !TryReadCurrentMetadata(pair.Value, out _))
+                    return false;
+            }
+
+            var artifacts = new List<ArchiveArtifact>();
+            var includedPaths = new List<string>();
+            var artifactNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var prepared in state.Artifacts)
+            {
+                if (string.IsNullOrWhiteSpace(prepared.FileName) ||
+                    !string.Equals(Path.GetFileName(prepared.FileName), prepared.FileName, StringComparison.Ordinal) ||
+                    !artifactNames.Add(prepared.FileName))
+                    return false;
+                var path = Path.Combine(temporaryRoot, prepared.FileName);
+                var info = new FileInfo(path);
+                if (!info.Exists || info.Length != prepared.Length ||
+                    info.LastWriteTimeUtc.Ticks != prepared.LastWriteUtcTicks)
+                    return false;
+                var sources = new List<CurrentFile>();
+                foreach (var sourcePath in prepared.SourcePaths ?? [])
+                {
+                    if (!current.TryGetValue(sourcePath, out var source)) return false;
+                    sources.Add(source);
+                    includedPaths.Add(sourcePath);
+                }
+                artifacts.Add(new ArchiveArtifact(
+                    info,
+                    sources,
+                    prepared.RootLabel,
+                    prepared.SourcePath,
+                    prepared.PartNumber,
+                    prepared.PartCount));
+            }
+
+            var included = includedPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (included.Count != includedPaths.Count) return false;
+            var expectedIncluded = state.Sources
+                .Where(item => !item.Skipped)
+                .Select(item => item.Path)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (!included.SetEquals(expectedIncluded)) return false;
+
+            var skipped = new List<SkippedArchiveFile>();
+            foreach (var source in state.Sources.Where(item => item.Skipped))
+            {
+                if (!current.TryGetValue(source.Path, out var item)) return false;
+                skipped.Add(new SkippedArchiveFile(item, source.SkipReason ?? "Dosya önceki sıkıştırmada atlandı."));
+            }
+            result = new ArchiveBuildResult(artifacts, skipped);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static void SavePreparedArchives(
+        string temporaryRoot,
+        ManualBackupRequest command,
+        IEnumerable<CurrentFile> files,
+        ArchiveBuildResult build)
+    {
+        var skipped = build.SkippedFiles.ToDictionary(
+            item => item.Source.File.FullName,
+            item => item.Reason,
+            StringComparer.OrdinalIgnoreCase);
+        var state = new PreparedArchiveState
+        {
+            RequestId = command.RequestId,
+            SnapshotFolder = command.SnapshotFolder,
+            Artifacts = build.Artifacts.Select(artifact => new PreparedArchiveArtifact
+            {
+                FileName = artifact.File.Name,
+                Length = artifact.File.Length,
+                LastWriteUtcTicks = artifact.File.LastWriteTimeUtc.Ticks,
+                SourcePaths = artifact.SourceFiles.Select(item => item.File.FullName).ToList(),
+                RootLabel = artifact.RootLabel,
+                SourcePath = artifact.SourcePath,
+                PartNumber = artifact.PartNumber,
+                PartCount = artifact.PartCount
+            }).ToList(),
+            Sources = files.OrderBy(item => item.File.FullName, StringComparer.OrdinalIgnoreCase).Select(item =>
+            {
+                var wasSkipped = skipped.TryGetValue(item.File.FullName, out var reason);
+                return new PreparedSourceFile
+                {
+                    Path = item.File.FullName,
+                    Length = item.ScannedLength,
+                    LastWriteUtcTicks = item.ScannedLastWriteUtcTicks,
+                    Skipped = wasSkipped,
+                    SkipReason = reason
+                };
+            }).ToList()
+        };
+        WriteJsonAtomic(Path.Combine(temporaryRoot, "prepared-archives.json"), state);
+    }
+
+    private static UploadCheckpointState LoadUploadCheckpoint(string path, string requestId)
+    {
+        if (!File.Exists(path)) return new UploadCheckpointState { RequestId = requestId };
+        try
+        {
+            var state = JsonSerializer.Deserialize<UploadCheckpointState>(File.ReadAllText(path), JsonOptions());
+            if (state is null || !string.Equals(state.RequestId, requestId, StringComparison.Ordinal))
+                return new UploadCheckpointState { RequestId = requestId };
+            state.Artifacts ??= [];
+            return state;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return new UploadCheckpointState { RequestId = requestId };
+        }
+    }
+
+    private static void SaveUploadCheckpoint(string? path, UploadCheckpointState? state)
+    {
+        if (string.IsNullOrWhiteSpace(path) || state is null) return;
+        WriteJsonAtomic(path, state);
+    }
+
+    private static void WriteJsonAtomic<T>(string path, T value)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllText(temporary, JsonSerializer.Serialize(value, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                WriteIndented = true
+            }));
+            File.Move(temporary, path, true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
     }
 
     private static IReadOnlyList<IReadOnlyList<CurrentFile>> PartitionArchiveFiles(IReadOnlyList<CurrentFile> files)
@@ -1159,6 +1397,8 @@ public sealed class BackupService
         string remotePath,
         string accessToken,
         int chunkSize,
+        UploadCheckpointState? checkpointState,
+        string? checkpointPath,
         Func<long, Task> progress,
         CancellationToken ct)
     {
@@ -1166,23 +1406,108 @@ public sealed class BackupService
         if (file.Length > maxFile) throw new IOException($"Dosya Dropbox sınırını aşıyor: {file.FullName}");
         var initialLength = file.Length;
         var initialTicks = file.LastWriteTimeUtc.Ticks;
+        var checkpoint = checkpointState?.Artifacts.FirstOrDefault(item =>
+            string.Equals(item.RemotePath, remotePath, StringComparison.OrdinalIgnoreCase));
+        if (checkpoint is null)
+        {
+            checkpoint = new UploadArtifactCheckpoint { RemotePath = remotePath };
+            checkpointState?.Artifacts.Add(checkpoint);
+        }
+        if (!string.Equals(checkpoint.FileName, file.Name, StringComparison.Ordinal) ||
+            checkpoint.FileLength != initialLength || checkpoint.LastWriteUtcTicks != initialTicks ||
+            checkpoint.Offset < 0 || checkpoint.Offset > initialLength)
+        {
+            checkpoint.FileName = file.Name;
+            checkpoint.FileLength = initialLength;
+            checkpoint.LastWriteUtcTicks = initialTicks;
+            checkpoint.SessionId = null;
+            checkpoint.Offset = 0;
+            checkpoint.Completed = false;
+            SaveUploadCheckpoint(checkpointPath, checkpointState);
+        }
+
+        if (checkpoint.Completed)
+        {
+            EnsureSourceFileUnchanged(file, initialLength, initialTicks);
+            await progress(initialLength);
+            return;
+        }
+
+        for (var sessionAttempt = 0; sessionAttempt < 2; sessionAttempt++)
+        {
+            try
+            {
+                await UploadSessionAsync(
+                    file,
+                    remotePath,
+                    accessToken,
+                    chunkSize,
+                    initialLength,
+                    checkpoint,
+                    checkpointState,
+                    checkpointPath,
+                    progress,
+                    ct);
+                EnsureSourceFileUnchanged(file, initialLength, initialTicks);
+                return;
+            }
+            catch (DropboxUploadSessionExpiredException) when (sessionAttempt == 0)
+            {
+                if (await DropboxFileMatchesLengthAsync(remotePath, initialLength, accessToken, ct))
+                {
+                    checkpoint.Offset = initialLength;
+                    checkpoint.Completed = true;
+                    SaveUploadCheckpoint(checkpointPath, checkpointState);
+                    EnsureSourceFileUnchanged(file, initialLength, initialTicks);
+                    await progress(initialLength);
+                    return;
+                }
+                checkpoint.SessionId = null;
+                checkpoint.Offset = 0;
+                checkpoint.Completed = false;
+                SaveUploadCheckpoint(checkpointPath, checkpointState);
+            }
+        }
+        throw new IOException($"Dropbox yükleme oturumu yenilenemedi: {file.FullName}");
+    }
+
+    private static async Task UploadSessionAsync(
+        FileInfo file,
+        string remotePath,
+        string accessToken,
+        int chunkSize,
+        long initialLength,
+        UploadArtifactCheckpoint checkpoint,
+        UploadCheckpointState? checkpointState,
+        string? checkpointPath,
+        Func<long, Task> progress,
+        CancellationToken ct)
+    {
         await using var stream = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, chunkSize, true);
         var buffer = new byte[chunkSize];
-        var first = await ReadChunkAsync(stream, buffer, ct);
-        using var start = await DropboxContentWithRetryAsync(
-            "https://content.dropboxapi.com/2/files/upload_session/start",
-            accessToken,
-            new { close = false },
-            buffer,
-            first,
-            "Dropbox yükleme oturumu başlatılamadı",
-            ct);
-        if (!start.IsSuccessStatusCode)
-            throw await DropboxFailureAsync("Dropbox oturumu başlatılamadı", file, start, ct);
-        using var startDoc = JsonDocument.Parse(await start.Content.ReadAsStringAsync(ct));
-        var sessionId = startDoc.RootElement.GetProperty("session_id").GetString()
-            ?? throw new IOException("Dropbox session id eksik.");
-        long offset = first;
+        var sessionId = checkpoint.SessionId;
+        var offset = checkpoint.Offset;
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            var first = await ReadChunkAsync(stream, buffer, ct);
+            using var start = await DropboxContentWithRetryAsync(
+                "https://content.dropboxapi.com/2/files/upload_session/start",
+                accessToken,
+                new { close = false },
+                buffer,
+                first,
+                "Dropbox yükleme oturumu başlatılamadı",
+                ct);
+            if (!start.IsSuccessStatusCode)
+                throw await DropboxFailureAsync("Dropbox oturumu başlatılamadı", file, start, ct);
+            using var startDoc = JsonDocument.Parse(await start.Content.ReadAsStringAsync(ct));
+            sessionId = startDoc.RootElement.GetProperty("session_id").GetString()
+                ?? throw new IOException("Dropbox session id eksik.");
+            offset = first;
+            checkpoint.SessionId = sessionId;
+            checkpoint.Offset = offset;
+            SaveUploadCheckpoint(checkpointPath, checkpointState);
+        }
         await progress(offset);
         var reconciliationAttempts = 0;
 
@@ -1230,6 +1555,9 @@ public sealed class BackupService
                 {
                     offset += count;
                     reconciliationAttempts = 0;
+                    checkpoint.Offset = offset;
+                    checkpoint.Completed = final;
+                    SaveUploadCheckpoint(checkpointPath, checkpointState);
                 }
                 else
                 {
@@ -1242,10 +1570,20 @@ public sealed class BackupService
                             throw new IOException(
                                 $"Dropbox yükleme konumu üç denemede uzlaştırılamadı: {file.FullName}");
                         offset = correctOffset;
+                        checkpoint.Offset = offset;
+                        SaveUploadCheckpoint(checkpointPath, checkpointState);
                     }
                     else if (final && await DropboxFileMatchesLengthAsync(remotePath, initialLength, accessToken, ct))
                     {
                         offset = initialLength;
+                        checkpoint.Offset = offset;
+                        checkpoint.Completed = true;
+                        SaveUploadCheckpoint(checkpointPath, checkpointState);
+                    }
+                    else if (error.SessionNotFound)
+                    {
+                        throw new DropboxUploadSessionExpiredException(
+                            $"Dropbox yükleme oturumu bulunamadı veya süresi doldu: {file.FullName}");
                     }
                     else
                     {
@@ -1257,7 +1595,7 @@ public sealed class BackupService
             await progress(offset);
         }
 
-        if (initialLength <= first)
+        if (!checkpoint.Completed && offset >= initialLength)
         {
             var arg = new
             {
@@ -1275,9 +1613,24 @@ public sealed class BackupService
                     0,
                     "Dropbox yüklemesi tamamlanamadı",
                     ct);
-                if (!response.IsSuccessStatusCode &&
-                    !await DropboxFileMatchesLengthAsync(remotePath, initialLength, accessToken, ct))
-                    throw await DropboxFailureAsync("Dropbox yüklemesi tamamlanamadı", file, response, ct);
+                if (!response.IsSuccessStatusCode)
+                {
+                    var error = await ReadDropboxErrorAsync(response, ct);
+                    if (await DropboxFileMatchesLengthAsync(remotePath, initialLength, accessToken, ct))
+                    {
+                        // The commit reached Dropbox but its response was lost.
+                    }
+                    else if (error.SessionNotFound)
+                    {
+                        throw new DropboxUploadSessionExpiredException(
+                            $"Dropbox yükleme oturumu bulunamadı veya süresi doldu: {file.FullName}");
+                    }
+                    else
+                    {
+                        throw new IOException(
+                            $"Dropbox yüklemesi tamamlanamadı: {file.FullName} (HTTP {(int)response.StatusCode}: {error.Summary})");
+                    }
+                }
             }
             catch (IOException)
             {
@@ -1288,11 +1641,17 @@ public sealed class BackupService
             {
                 response?.Dispose();
             }
+            checkpoint.Offset = initialLength;
+            checkpoint.Completed = true;
+            SaveUploadCheckpoint(checkpointPath, checkpointState);
             await progress(offset);
         }
+    }
 
+    private static void EnsureSourceFileUnchanged(FileInfo file, long initialLength, long initialTicks)
+    {
         file.Refresh();
-        if (file.Length != initialLength || file.LastWriteTimeUtc.Ticks != initialTicks)
+        if (!file.Exists || file.Length != initialLength || file.LastWriteTimeUtc.Ticks != initialTicks)
             throw new IOException($"Dosya yedeklenirken değişti; snapshot tamamlanmadı: {file.FullName}");
     }
 
@@ -1388,8 +1747,8 @@ public sealed class BackupService
     {
         var retryAfter = response?.Headers.RetryAfter?.Delta;
         if (retryAfter is { } requested && requested > TimeSpan.Zero)
-            return requested > TimeSpan.FromSeconds(60) ? TimeSpan.FromSeconds(60) : requested;
-        return TimeSpan.FromSeconds(Math.Min(30, 1 << Math.Min(attempt, 5)));
+            return requested > TimeSpan.FromSeconds(120) ? TimeSpan.FromSeconds(120) : requested;
+        return TimeSpan.FromSeconds(Math.Min(120, 1 << Math.Min(attempt, 7)));
     }
 
     private static async Task<DropboxErrorInfo> ReadDropboxErrorAsync(
@@ -1398,7 +1757,7 @@ public sealed class BackupService
     {
         var raw = await response.Content.ReadAsStringAsync(ct);
         if (string.IsNullOrWhiteSpace(raw))
-            return new DropboxErrorInfo(response.ReasonPhrase ?? "Dropbox hatası", null);
+            return new DropboxErrorInfo(response.ReasonPhrase ?? "Dropbox hatası", null, false);
         try
         {
             using var document = JsonDocument.Parse(raw);
@@ -1406,12 +1765,32 @@ public sealed class BackupService
             var summary = root.TryGetProperty("error_summary", out var summaryElement)
                 ? summaryElement.GetString() ?? raw
                 : raw;
-            return new DropboxErrorInfo(summary, FindCorrectOffset(root));
+            return new DropboxErrorInfo(summary, FindCorrectOffset(root), ContainsDropboxTag(root, "not_found"));
         }
         catch (JsonException)
         {
-            return new DropboxErrorInfo(raw, null);
+            return new DropboxErrorInfo(raw, null, raw.Contains("not_found", StringComparison.OrdinalIgnoreCase));
         }
+    }
+
+    private static bool ContainsDropboxTag(JsonElement element, string expected)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                if (property.NameEquals(".tag") && property.Value.ValueKind == JsonValueKind.String &&
+                    string.Equals(property.Value.GetString(), expected, StringComparison.OrdinalIgnoreCase))
+                    return true;
+                if (ContainsDropboxTag(property.Value, expected)) return true;
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+                if (ContainsDropboxTag(item, expected)) return true;
+        }
+        return false;
     }
 
     private static long? FindCorrectOffset(JsonElement element)
