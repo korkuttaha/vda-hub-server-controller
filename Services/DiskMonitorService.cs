@@ -11,6 +11,7 @@ public class DiskMonitorService
         {
             ServerId = config.ServerId,
             ServerName = string.IsNullOrWhiteSpace(config.ServerName) ? Environment.MachineName : config.ServerName,
+            AgentVersion = typeof(DiskMonitorService).Assembly.GetName().Version?.ToString(3) ?? "unknown",
             MachineName = Environment.MachineName,
             OsVersion = Environment.OSVersion.ToString(),
             Timestamp = DateTime.UtcNow
