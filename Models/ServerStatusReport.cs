@@ -4,6 +4,7 @@ public class ServerStatusReport
 {
     public string ServerId { get; set; } = string.Empty;
     public string ServerName { get; set; } = string.Empty;
+    public string AgentVersion { get; set; } = string.Empty;
     public string MachineName { get; set; } = Environment.MachineName;
     public string OsVersion { get; set; } = Environment.OSVersion.ToString();
     public DateTime Timestamp { get; set; } = DateTime.UtcNow;
