@@ -42,9 +42,10 @@ jobs:
         run: |
           dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ./publish
 
-      - name: Package Zip Archive
+      - name: Package Server Controller and PC Agent
         shell: pwsh
         run: |
+          Copy-Item ./publish/VdaHubServerController.exe ./publish/VDAKorPcAgent.exe
           Compress-Archive -Path ./publish/VdaHubServerController.exe, ./config.example.json, ./README.md -DestinationPath ./publish/vda-hub-server-controller-win-x64.zip
 
       - name: Publish GitHub Release
@@ -54,6 +55,7 @@ jobs:
           target_commitish: ${{ github.sha }}
           files: |
             ./publish/VdaHubServerController.exe
+            ./publish/VDAKorPcAgent.exe
             ./publish/vda-hub-server-controller-win-x64.zip
           name: Release ${{ env.RELEASE_TAG }}
           draft: false

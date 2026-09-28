@@ -19,7 +19,9 @@ internal static class Program
     static async Task<int> Main(string[] args)
     {
         // If launched with arguments from terminal, attach to parent console so output is visible
-        if (args.Length > 0 && !args.Contains("--service", StringComparer.OrdinalIgnoreCase))
+        if (args.Length > 0 &&
+            !args.Contains("--service", StringComparer.OrdinalIgnoreCase) &&
+            !args.Contains("--pc-service", StringComparer.OrdinalIgnoreCase))
         {
             AttachConsole(ATTACH_PARENT_PROCESS);
         }
@@ -31,13 +33,27 @@ internal static class Program
             return 0;
         }
 
-        // 2. Command-line: Windows Service Mode
+        // 2. Personal PC Agent mode is intentionally separate from the server controller.
+        if (args.Contains("--pc-service", StringComparer.OrdinalIgnoreCase))
+        {
+            return await RunAsPcServiceAsync(args);
+        }
+
+        var executableName = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? string.Empty);
+        var pcAgentUi = args.Contains("--pc-agent", StringComparer.OrdinalIgnoreCase) ||
+            executableName.Equals("VDAKorPcAgent", StringComparison.OrdinalIgnoreCase);
+        if (pcAgentUi)
+        {
+            return RunPcAgentUi();
+        }
+
+        // 3. Server Controller Windows Service Mode
         if (args.Contains("--service", StringComparer.OrdinalIgnoreCase))
         {
             return await RunAsWindowsServiceAsync(args);
         }
 
-        // 3. Command-line: Service Installation / Lifecycle
+        // 4. Server Controller service installation / lifecycle
         if (args.Contains("--install-service", StringComparer.OrdinalIgnoreCase))
         {
             var installConfig = new ConfigService();
@@ -73,14 +89,13 @@ internal static class Program
             return success ? 0 : 1;
         }
 
-        // 4. Command-line: Diagnostics & Testing
+        // 5. Command-line: Diagnostics & Testing
         var configService = new ConfigService();
         var diskMonitor = new DiskMonitorService();
         var brevoService = new BrevoEmailService();
         var hubClient = new HubClientService();
         var backupService = new BackupService(configService);
-        var powerCommandService = new PowerCommandService(configService);
-        var engine = new ControllerEngine(configService, diskMonitor, brevoService, hubClient, backupService, powerCommandService);
+        var engine = new ControllerEngine(configService, diskMonitor, brevoService, hubClient, backupService);
 
         if (args.Contains("--test-mail", StringComparer.OrdinalIgnoreCase))
         {
@@ -115,7 +130,7 @@ internal static class Program
             return 0;
         }
 
-        // 5. One-time enrollment / on-demand settings UI. Continuous work runs headless as a service.
+        // 6. Server Controller one-time enrollment / on-demand settings UI.
         const string mutexName = "Global\\VdaHubServerController_Mutex";
         _singleInstanceMutex = new Mutex(true, mutexName, out bool createdNew);
         if (!createdNew)
@@ -174,6 +189,80 @@ internal static class Program
         return 0;
     }
 
+    private static int RunPcAgentUi()
+    {
+        const string mutexName = "Global\\VDAKorPcAgent_UI_Mutex";
+        using var mutex = new Mutex(true, mutexName, out var createdNew);
+        if (!createdNew)
+        {
+            MessageBox.Show(
+                "VDAKor PC Agent kurulum penceresi zaten açık.",
+                "VDAKor PC Agent",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return 0;
+        }
+
+        ApplicationConfiguration.Initialize();
+        var config = new PcConfigService();
+        if (!PcEnrollmentService.IsEnrolled(config.Current))
+        {
+            using var form = new PcEnrollmentForm(new PcEnrollmentService(config));
+            if (form.ShowDialog() != DialogResult.OK)
+                return 1;
+        }
+
+        var executable = Environment.ProcessPath ?? Application.ExecutablePath;
+        var (installed, installMessage) = PcWindowsServiceManager.InstallService(executable);
+        if (!installed)
+        {
+            MessageBox.Show(installMessage, "PC Agent servisi kurulamadı", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return 1;
+        }
+
+        var (started, startMessage) = PcWindowsServiceManager.StartService();
+        if (!started && !PcWindowsServiceManager.GetServiceStatus().StartsWith("Çalışıyor", StringComparison.Ordinal))
+        {
+            MessageBox.Show(startMessage, "PC Agent başlatılamadı", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return 1;
+        }
+
+        MessageBox.Show(
+            $"{config.Current.ComputerName} VDAKor Hub'a bağlı.\n\nPC Agent arka planda Windows servisi olarak çalışıyor.",
+            "VDAKor PC Agent hazır",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
+        return 0;
+    }
+
+    private static async Task<int> RunAsPcServiceAsync(string[] args)
+    {
+        try
+        {
+            var builder = Host.CreateDefaultBuilder(args)
+                .UseWindowsService(options =>
+                {
+                    options.ServiceName = PcWindowsServiceManager.ServiceName;
+                })
+                .ConfigureServices((hostContext, services) =>
+                {
+                    services.AddSingleton<PcConfigService>();
+                    services.AddSingleton<PcPowerCommandService>();
+                    services.AddSingleton<PcAgentEngine>();
+                    services.AddHostedService<PcWorkerService>();
+                });
+
+            var host = builder.Build();
+            await host.RunAsync();
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"VDAKor PC Agent servis hatası: {ex.Message}");
+            return 1;
+        }
+    }
+
     private static void PrintHelp()
     {
         Console.WriteLine(@"
@@ -182,6 +271,11 @@ internal static class Program
 ============================================================
 Kullanım:
   VdaHubServerController.exe [seçenek]
+
+Kişisel PC modu:
+  VDAKorPcAgent.exe          : Hub > Bilgisayarlar koduyla kişisel PC eşleştirmesi.
+  --pc-agent                : Aynı kişisel PC kurulum modunu açıkça başlatır.
+  --pc-service              : VDAKor PC Agent Windows servisi (arka plan).
 
 Seçenekler:
   (parametre yok)     : İlk kurulumda eşleştirir; sonrasında geçici ayar ekranını açar.
@@ -218,7 +312,6 @@ Seçenekler:
                     services.AddSingleton<BrevoEmailService>();
                     services.AddSingleton<HubClientService>();
                     services.AddSingleton<BackupService>();
-                    services.AddSingleton<PowerCommandService>();
                     services.AddSingleton<ControllerEngine>();
                     services.AddHostedService<WorkerService>();
                 });

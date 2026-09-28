@@ -9,7 +9,6 @@ public class ControllerEngine
     private readonly BrevoEmailService _brevoService;
     private readonly HubClientService _hubClient;
     private readonly BackupService _backupService;
-    private readonly PowerCommandService _powerCommands;
 
     public event Action<string>? OnLog;
     public event Action<ServerStatusReport>? OnReportUpdated;
@@ -21,15 +20,13 @@ public class ControllerEngine
         DiskMonitorService diskMonitor,
         BrevoEmailService brevoService,
         HubClientService hubClient,
-        BackupService backupService,
-        PowerCommandService powerCommands)
+        BackupService backupService)
     {
         _configService = configService;
         _diskMonitor = diskMonitor;
         _brevoService = brevoService;
         _hubClient = hubClient;
         _backupService = backupService;
-        _powerCommands = powerCommands;
     }
 
     private void Log(string message)
@@ -139,7 +136,6 @@ public class ControllerEngine
     {
         Log("Arka plan izleme döngüsü başlatıldı.");
         var backupLoop = RunBackupCommandLoopAsync(ct);
-        var powerLoop = RunPowerCommandLoopAsync(ct);
 
         // İlk döngüyü hemen çalıştır
         try
@@ -172,34 +168,7 @@ public class ControllerEngine
         }
 
         try { await backupLoop; } catch (TaskCanceledException) { }
-        try { await powerLoop; } catch (TaskCanceledException) { }
         Log("Arka plan izleme döngüsü sonlandırıldı.");
-    }
-
-    private async Task RunPowerCommandLoopAsync(CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                if (_configService.Current.Hub.Enabled)
-                {
-                    var result = await _powerCommands.RunPendingAsync(ct);
-                    if (result.Ran)
-                        Log(result.Success ? $"✓ Uzaktan güç komutu: {result.Message}" : $"✗ Uzaktan güç komutu: {result.Message}");
-                }
-                await Task.Delay(TimeSpan.FromSeconds(5), ct);
-            }
-            catch (TaskCanceledException)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                Log($"Güç komutu kontrol hatası: {ex.Message}");
-                await Task.Delay(TimeSpan.FromSeconds(10), ct);
-            }
-        }
     }
 
     private async Task RunBackupCommandLoopAsync(CancellationToken ct)
