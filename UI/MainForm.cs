@@ -101,18 +101,35 @@ public class MainForm : Form
         var pnlHeader = new Panel
         {
             Dock = DockStyle.Top,
-            Height = 85,
+            Height = 96,
             BackColor = Color.FromArgb(30, 41, 59),
-            Padding = new Padding(20, 12, 20, 12)
+            Padding = new Padding(20, 10, 20, 10)
         };
+
+        var headerLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 2,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = pnlHeader.BackColor
+        };
+        headerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        headerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 465));
+        headerLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        headerLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         _lblServerTitle = new Label
         {
             Text = "VDA HUB SERVER CONTROLLER",
             ForeColor = Color.White,
             Font = new Font("Segoe UI", 13.5f, FontStyle.Bold),
-            AutoSize = true,
-            Location = new Point(20, 14)
+            AutoSize = false,
+            AutoEllipsis = true,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Margin = Padding.Empty
         };
 
         _lblServerMeta = new Label
@@ -120,8 +137,11 @@ public class MainForm : Form
             Text = $"Sunucu: {Environment.MachineName} • İşletim Sistemi: {Environment.OSVersion}",
             ForeColor = Color.FromArgb(148, 163, 184),
             Font = new Font("Segoe UI", 9.0f, FontStyle.Regular),
-            AutoSize = true,
-            Location = new Point(20, 44)
+            AutoSize = false,
+            AutoEllipsis = true,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Margin = Padding.Empty
         };
 
         _lblStatusBadge = new Label
@@ -166,16 +186,20 @@ public class MainForm : Form
 
         var pnlHeaderActions = new FlowLayoutPanel
         {
-            Dock = DockStyle.Right,
-            Width = 465,
-            Padding = new Padding(0, 23, 17, 0),
+            Dock = DockStyle.Fill,
+            Padding = new Padding(0, 4, 0, 0),
+            Margin = Padding.Empty,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
             BackColor = pnlHeader.BackColor
         };
         pnlHeaderActions.Controls.AddRange(new Control[] { _lblStatusBadge, _btnScanNow, _btnCloseSettings });
 
-        pnlHeader.Controls.AddRange(new Control[] { _lblServerTitle, _lblServerMeta, pnlHeaderActions });
+        headerLayout.Controls.Add(_lblServerTitle, 0, 0);
+        headerLayout.Controls.Add(pnlHeaderActions, 1, 0);
+        headerLayout.Controls.Add(_lblServerMeta, 0, 1);
+        headerLayout.SetColumnSpan(_lblServerMeta, 2);
+        pnlHeader.Controls.Add(headerLayout);
 
         // 2. Tab Control
         _tabControl = new TabControl
