@@ -79,7 +79,8 @@ internal static class Program
         var brevoService = new BrevoEmailService();
         var hubClient = new HubClientService();
         var backupService = new BackupService(configService);
-        var engine = new ControllerEngine(configService, diskMonitor, brevoService, hubClient, backupService);
+        var powerCommandService = new PowerCommandService(configService);
+        var engine = new ControllerEngine(configService, diskMonitor, brevoService, hubClient, backupService, powerCommandService);
 
         if (args.Contains("--test-mail", StringComparer.OrdinalIgnoreCase))
         {
@@ -217,6 +218,7 @@ Seçenekler:
                     services.AddSingleton<BrevoEmailService>();
                     services.AddSingleton<HubClientService>();
                     services.AddSingleton<BackupService>();
+                    services.AddSingleton<PowerCommandService>();
                     services.AddSingleton<ControllerEngine>();
                     services.AddHostedService<WorkerService>();
                 });
