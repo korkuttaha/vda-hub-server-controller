@@ -14,21 +14,32 @@ public sealed class PcAgentEngine
         Console.WriteLine("[VDAKor PC Agent] Arka plan bağlantısı başlatıldı.");
         while (!ct.IsCancellationRequested)
         {
+            var delay = TimeSpan.FromSeconds(5);
             try
             {
                 var result = await _power.PollAndRunAsync(ct);
                 if (result.CommandReceived)
                     Console.WriteLine($"[VDAKor PC Agent] {(result.Success ? "OK" : "HATA")}: {result.Message}");
-                await Task.Delay(TimeSpan.FromSeconds(5), ct);
             }
-            catch (TaskCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
             }
             catch (Exception ex)
             {
+                // HttpClient timeouts also throw TaskCanceledException. Only the host token
+                // can stop this worker; a transient timeout must leave polling alive.
                 Console.Error.WriteLine("[VDAKor PC Agent] Hub bağlantı hatası: " + ex.Message);
-                await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                delay = TimeSpan.FromSeconds(10);
+            }
+
+            try
+            {
+                await Task.Delay(delay, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
             }
         }
     }
