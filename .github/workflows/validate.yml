@@ -22,3 +22,6 @@ jobs:
       - name: PC Agent reconnect regression checks
         shell: pwsh
         run: ./tests/test-pc-agent-reconnect.ps1
+      - name: PC Agent installation flow checks
+        shell: pwsh
+        run: ./tests/test-pc-agent-install-flow.ps1
