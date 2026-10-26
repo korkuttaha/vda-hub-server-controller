@@ -226,6 +226,11 @@ internal static class Program
         }
         else
         {
+            // Opening a downloaded update must replace the installed service before
+            // showing status. Closing the status dialog used to skip installation.
+            if (!EnsurePcAgentService(forceRestart: false))
+                return 1;
+
             using var statusForm = new PcStatusForm(config);
             var statusResult = statusForm.ShowDialog();
             if (statusResult == DialogResult.Retry)
@@ -240,27 +245,34 @@ internal static class Program
             }
         }
 
+        if (!EnsurePcAgentService(forceRestart: true))
+            return 1;
+
+        MessageBox.Show(
+            $"{config.Current.ComputerName} için PC Agent servisi başlatıldı.\n\nHub bağlantısı kurulduğunda bilgisayar Hub ve Android uygulamada çevrimiçi görünecek.",
+            "VDAKor PC Agent hazır",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
+        return 0;
+    }
+
+    private static bool EnsurePcAgentService(bool forceRestart)
+    {
         var executable = Environment.ProcessPath ?? Application.ExecutablePath;
-        var (installed, installMessage) = PcWindowsServiceManager.InstallService(executable, forceRestart: true);
+        var (installed, installMessage) = PcWindowsServiceManager.InstallService(executable, forceRestart);
         if (!installed)
         {
             MessageBox.Show(installMessage, "PC Agent servisi kurulamadı", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return 1;
+            return false;
         }
 
         var (started, startMessage) = PcWindowsServiceManager.StartService();
         if (!started && !PcWindowsServiceManager.GetServiceStatus().StartsWith("Çalışıyor", StringComparison.Ordinal))
         {
             MessageBox.Show(startMessage, "PC Agent başlatılamadı", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return 1;
+            return false;
         }
-
-        MessageBox.Show(
-            $"{config.Current.ComputerName} VDAKor Hub'a bağlı.\n\nPC Agent arka planda Windows servisi olarak çalışıyor.",
-            "VDAKor PC Agent hazır",
-            MessageBoxButtons.OK,
-            MessageBoxIcon.Information);
-        return 0;
+        return true;
     }
 
     private static async Task<int> RunAsPcServiceAsync(string[] args)

@@ -12,7 +12,8 @@ public sealed class PcStatusForm : Form
     public PcStatusForm(PcConfigService config)
     {
         _config = config;
-        Text = "VDAKor PC Agent · Durum";
+        var version = typeof(PcStatusForm).Assembly.GetName().Version?.ToString(3) ?? "—";
+        Text = $"VDAKor PC Agent · v{version}";
         Size = new Size(620, 420);
         MinimumSize = MaximumSize = Size;
         StartPosition = FormStartPosition.CenterScreen;
@@ -23,7 +24,7 @@ public sealed class PcStatusForm : Form
 
         var title = new Label
         {
-            Text = "VDAKor PC Agent Çalışıyor",
+            Text = $"VDAKor PC Agent · v{version}",
             Font = new Font("Segoe UI", 14f, FontStyle.Bold),
             ForeColor = Color.FromArgb(15, 23, 42),
             Location = new Point(28, 24),
@@ -31,7 +32,7 @@ public sealed class PcStatusForm : Form
         };
         var desc = new Label
         {
-            Text = "Bu bilgisayar VDAKor Hub'a bağlıdır ve arka planda Windows servisi olarak komutları dinlemektedir.",
+            Text = "Servisin çalışması Hub bağlantısını doğrulamaz. Bağlantıyı Hub veya Android uygulamadaki son görülme bilgisinden kontrol edin.",
             ForeColor = Color.FromArgb(71, 85, 105),
             Location = new Point(28, 60),
             Size = new Size(540, 40)
@@ -50,7 +51,7 @@ public sealed class PcStatusForm : Form
         var lblPcTitle = new Label { Text = "Bilgisayar Adı:", Location = new Point(16, 16), AutoSize = true, ForeColor = Color.FromArgb(100, 116, 139), Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
         var lblPcValue = new Label { Text = _config.Current.ComputerName, Location = new Point(16, 36), AutoSize = true, ForeColor = Color.FromArgb(15, 23, 42), Font = new Font("Segoe UI", 10.5f, FontStyle.Bold) };
 
-        var lblHubTitle = new Label { Text = "Bağlı Hub Adresi:", Location = new Point(16, 68), AutoSize = true, ForeColor = Color.FromArgb(100, 116, 139), Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
+        var lblHubTitle = new Label { Text = "Hub Adresi:", Location = new Point(16, 68), AutoSize = true, ForeColor = Color.FromArgb(100, 116, 139), Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
         var lblHubValue = new Label { Text = _config.Current.HubBaseUrl, Location = new Point(16, 88), AutoSize = true, ForeColor = Color.FromArgb(15, 23, 42), Font = new Font("Segoe UI", 9.5f) };
 
         var lblServiceTitle = new Label { Text = "Windows Servis Durumu:", Location = new Point(16, 120), AutoSize = true, ForeColor = Color.FromArgb(100, 116, 139), Font = new Font("Segoe UI", 9f, FontStyle.Bold) };
