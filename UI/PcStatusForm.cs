@@ -12,7 +12,8 @@ public sealed class PcStatusForm : Form
     public PcStatusForm(PcConfigService config)
     {
         _config = config;
-        Text = "VDAKor PC Agent · Durum";
+        var version = typeof(PcStatusForm).Assembly.GetName().Version?.ToString(3) ?? "—";
+        Text = $"VDAKor PC Agent · v{version}";
         Size = new Size(620, 420);
         MinimumSize = MaximumSize = Size;
         StartPosition = FormStartPosition.CenterScreen;
@@ -23,7 +24,7 @@ public sealed class PcStatusForm : Form
 
         var title = new Label
         {
-            Text = "VDAKor PC Agent · Durum",
+            Text = $"VDAKor PC Agent · v{version}",
             Font = new Font("Segoe UI", 14f, FontStyle.Bold),
             ForeColor = Color.FromArgb(15, 23, 42),
             Location = new Point(28, 24),
