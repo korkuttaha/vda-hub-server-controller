@@ -8,6 +8,8 @@
   <ItemGroup>
     <Compile Include="../../Models/WindowsUpdateSnapshot.cs" Link="WindowsUpdateSnapshot.cs" />
     <Compile Include="../../Models/ServerStatusReport.cs" Link="ServerStatusReport.cs" />
+    <Compile Include="../../Models/SqlBackupServiceSnapshot.cs" Link="SqlBackupServiceSnapshot.cs" />
+    <Compile Include="../../Services/SqlBackupStateReader.cs" Link="SqlBackupStateReader.cs" />
     <Compile Include="../../Models/DiskVolumeInfo.cs" Link="DiskVolumeInfo.cs" />
     <Compile Include="../../Models/PhysicalDiskInfo.cs" Link="PhysicalDiskInfo.cs" />
     <Compile Include="../../Models/AppConfig.cs" Link="AppConfig.cs" />

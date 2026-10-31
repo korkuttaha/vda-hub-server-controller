@@ -6,6 +6,33 @@ var root = Path.Combine(Path.GetTempPath(), "vdakor-update-checks-" + Guid.NewGu
 Directory.CreateDirectory(root);
 try
 {
+    var sqlSnapshot = new SqlBackupServiceSnapshot { Status = "success", Installed = true, CheckedAtUtc = DateTime.UtcNow };
+    Check(SqlBackupStateReader.Read(sqlSnapshot, root).ScheduleState == "missing", "Missing SQL scheduler state must be distinct from success.");
+    var sqlStateDirectory = Path.Combine(root, "VDA.MssqlBackup.Service", "state");
+    Directory.CreateDirectory(sqlStateDirectory);
+    var sqlStatePath = Path.Combine(sqlStateDirectory, "schedule-state.json");
+    File.WriteAllText(sqlStatePath, JsonSerializer.Serialize(new
+    {
+        NextRunUtc = DateTimeOffset.UtcNow.AddHours(1), LastAttemptUtc = DateTimeOffset.UtcNow.AddMinutes(-5),
+        LastCompletedUtc = DateTimeOffset.UtcNow.AddMinutes(-1), LastOutcome = "Başarılı", InProgress = false,
+        Password = "must-never-leave-the-server", ConnectionString = "private-connection", LastOperationId = "private-operation"
+    }));
+    var sqlState = SqlBackupStateReader.Read(sqlSnapshot, root);
+    Check(sqlState is { ScheduleState: "available", LastOutcome: "succeeded", InProgress: false, LastCompletedUtc: not null }, "SQL scheduler success lost details.");
+    var sqlJson = JsonSerializer.Serialize(sqlState);
+    Check(!sqlJson.Contains("must-never") && !sqlJson.Contains("private-"), "Private SQL state was included in the report.");
+    File.WriteAllText(sqlStatePath, "{broken");
+    Check(SqlBackupStateReader.Read(sqlSnapshot, root) is { Installed: true, ScheduleState: "error" }, "A corrupt SQL state erased installed service status.");
+    File.WriteAllText(sqlStatePath, new string('x', 65537));
+    Check(SqlBackupStateReader.Read(sqlSnapshot, root).ScheduleState == "error", "Oversized SQL state was accepted.");
+    File.WriteAllText(sqlStatePath, JsonSerializer.Serialize(new
+    {
+        NextRunUtc = DateTimeOffset.UtcNow.AddHours(1), LastOutcome = "Password=must-never-leave-the-server",
+        LastCompletedUtc = DateTimeOffset.UtcNow.AddDays(1), InProgress = "invalid"
+    }));
+    Check(SqlBackupStateReader.Read(sqlSnapshot, root) is { ScheduleState: "available", LastOutcome: "unknown", LastCompletedUtc: null, InProgress: null },
+        "Unknown outcomes or invalid timestamps/booleans leaked into SQL status.");
+
     var clock = new TestClock();
     var scans = 0;
     var fail = false;
@@ -87,10 +114,16 @@ try
     var serviceMonitor = new WindowsUpdateMonitorService(_ => Task.FromResult(Success(4, true)), clock, sharedPath);
     await serviceMonitor.RefreshIfDueAsync(default);
     Check(openSettings.GetSnapshot() is { PendingCount: 4, RebootRequired: true }, "Open settings window failed to read the service's newer scan.");
-    Console.WriteLine("PASS: scheduling, failure/backoff/recovery, restart cache, bounded payload, heartbeat isolation, cancellation, corrupt/malformed cache.");
+    Console.WriteLine("PASS: SQL backup state allowlist, size bounds, missing/corrupt data; Windows Update scheduling, recovery, cache, heartbeat isolation and cancellation.");
 }
 finally
 {
+    var sqlDirectory = Path.Combine(root, "VDA.MssqlBackup.Service");
+    var sqlStateDirectory = Path.Combine(sqlDirectory, "state");
+    var sqlStatePath = Path.Combine(sqlStateDirectory, "schedule-state.json");
+    if (File.Exists(sqlStatePath)) File.Delete(sqlStatePath);
+    if (Directory.Exists(sqlStateDirectory)) Directory.Delete(sqlStateDirectory);
+    if (Directory.Exists(sqlDirectory)) Directory.Delete(sqlDirectory);
     // Every file is generated inside this unique, fixed temporary test directory.
     foreach (var file in Directory.EnumerateFiles(root)) File.Delete(file);
     Directory.Delete(root);
