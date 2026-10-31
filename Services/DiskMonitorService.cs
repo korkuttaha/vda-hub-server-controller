@@ -5,6 +5,8 @@ namespace VdaHubServerController.Services;
 
 public class DiskMonitorService
 {
+    public List<WatchedServiceSnapshot> CollectWatchedServices(AgentControlSettings settings) => WatchedServiceMonitor.Collect(settings);
+
     public ServerStatusReport CollectReport(AppConfig config)
     {
         var report = new ServerStatusReport

@@ -6,6 +6,7 @@ var root = Path.Combine(Path.GetTempPath(), "vdakor-update-checks-" + Guid.NewGu
 Directory.CreateDirectory(root);
 try
 {
+    await ControlChecks.RunAsync(root);
     var sqlSnapshot = new SqlBackupServiceSnapshot { Status = "success", Installed = true, CheckedAtUtc = DateTime.UtcNow };
     Check(SqlBackupStateReader.Read(sqlSnapshot, root).ScheduleState == "missing", "Missing SQL scheduler state must be distinct from success.");
     var sqlStateDirectory = Path.Combine(root, "VDA.MssqlBackup.Service", "state");
@@ -46,10 +47,10 @@ try
     await monitor.RefreshIfDueAsync(default);
     Check(monitor.Current is { Status: "success", PendingCount: 3, RebootRequired: true }, "Successful scan lost state.");
     var lastGood = monitor.Current!.LastSuccessfulScanAtUtc;
-    clock.Advance(TimeSpan.FromHours(5));
+    clock.Advance(TimeSpan.FromMinutes(59));
     await monitor.RefreshIfDueAsync(default);
     Check(scans == 1, "Metrics reports caused repeated expensive scans.");
-    clock.Advance(TimeSpan.FromHours(1));
+    clock.Advance(TimeSpan.FromMinutes(1));
     fail = true;
     await monitor.RefreshIfDueAsync(default);
     Check(monitor.Current is { Status: "error", PendingCount: null, RebootRequired: null }, "Failure was reported as healthy/cached zero.");
@@ -84,7 +85,10 @@ try
         return Success(0, false);
     }, clock, Path.Combine(root, "blocked.json"));
     var hub = new HubClientService();
-    var engine = new ControllerEngine(new ConfigService(), new DiskMonitorService(), new BrevoEmailService(), hub, new BackupService(), blocked);
+    var testConfig = new ConfigService();
+    var testControl = new ServerAgentControlService(() => testConfig.Current, blocked, Path.Combine(root, "engine-control.json"),
+        new HttpClient(new ControlHandler(() => new HttpResponseMessage(System.Net.HttpStatusCode.ServiceUnavailable))), clock);
+    var engine = new ControllerEngine(testConfig, new DiskMonitorService(), new BrevoEmailService(), hub, new BackupService(), blocked, testControl);
     var loop = engine.StartLoopAsync(stop.Token);
     await started.Task.WaitAsync(TimeSpan.FromSeconds(2));
     Check(hub.Reports == 1, "A blocked Windows Update scan blocked the initial metrics report.");

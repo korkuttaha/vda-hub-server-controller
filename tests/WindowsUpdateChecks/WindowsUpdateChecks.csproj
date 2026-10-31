@@ -6,6 +6,8 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../Models/AgentControlSettings.cs" Link="AgentControlSettings.cs" />
+    <Compile Include="../../Services/ServerAgentControlService.cs" Link="ServerAgentControlService.cs" />
     <Compile Include="../../Models/WindowsUpdateSnapshot.cs" Link="WindowsUpdateSnapshot.cs" />
     <Compile Include="../../Models/ServerStatusReport.cs" Link="ServerStatusReport.cs" />
     <Compile Include="../../Models/SqlBackupServiceSnapshot.cs" Link="SqlBackupServiceSnapshot.cs" />

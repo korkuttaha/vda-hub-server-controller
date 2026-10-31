@@ -1,4 +1,5 @@
 using VdaHubServerController.Models;
+using System.Diagnostics;
 
 namespace VdaHubServerController.Services;
 
@@ -10,11 +11,15 @@ public class ControllerEngine
     private readonly HubClientService _hubClient;
     private readonly BackupService _backupService;
     private readonly WindowsUpdateMonitorService _windowsUpdates;
+    private readonly ServerAgentControlService _control;
+    private readonly SemaphoreSlim _reportGate = new(1, 1);
+    private long _lastCycleTimestamp;
 
     public event Action<string>? OnLog;
     public event Action<ServerStatusReport>? OnReportUpdated;
 
     public ServerStatusReport? LastReport { get; private set; }
+    public int ReportIntervalMinutes => _control.Settings.ReportIntervalMinutes;
 
     public ControllerEngine(
         ConfigService configService,
@@ -22,7 +27,8 @@ public class ControllerEngine
         BrevoEmailService brevoService,
         HubClientService hubClient,
         BackupService backupService,
-        WindowsUpdateMonitorService? windowsUpdates = null)
+        WindowsUpdateMonitorService? windowsUpdates = null,
+        ServerAgentControlService? control = null)
     {
         _configService = configService;
         _diskMonitor = diskMonitor;
@@ -30,6 +36,8 @@ public class ControllerEngine
         _hubClient = hubClient;
         _backupService = backupService;
         _windowsUpdates = windowsUpdates ?? new WindowsUpdateMonitorService();
+        _control = control ?? new ServerAgentControlService(() => _configService.Current, _windowsUpdates,
+            Path.Combine(ConfigService.InstallDirectory, "agent-control.json"));
     }
 
     private void Log(string message)
@@ -44,31 +52,42 @@ public class ControllerEngine
         bool forceHub = false,
         CancellationToken ct = default)
     {
-        var config = _configService.Current;
-        Log("Disk durumu taranıyor...");
-
-        var report = _diskMonitor.CollectReport(config);
-        report.WindowsUpdate = _windowsUpdates.GetSnapshot();
-        LastReport = report;
-        OnReportUpdated?.Invoke(report);
-
-        Log($"Tarama tamamlandı: {report.Volumes.Count} bölüm, {report.PhysicalDisks.Count} fiziksel disk bulundu. Genel durum: {report.OverallStatus}");
-
-        // 1. Hub Raporu
-        if (config.Hub.Enabled || forceHub)
+        await _reportGate.WaitAsync(ct);
+        try
         {
-            Log($"VDA Hub'a rapor gönderiliyor ({config.Hub.HubApiUrl})...");
-            var (hubSuccess, hubMsg, _) = await _hubClient.SendReportAsync(config.Hub, report, ct);
-            Log(hubSuccess ? $"✓ VDA Hub: {hubMsg}" : $"✗ VDA Hub Hatası: {hubMsg}");
-        }
+            Interlocked.Exchange(ref _lastCycleTimestamp, Stopwatch.GetTimestamp());
+            var config = _configService.Current;
+            Log("Disk durumu taranıyor...");
 
-        // 2. Brevo E-Posta İşlemleri
-        if (config.Brevo.Enabled || forceEmail)
-        {
-            await HandleBrevoNotificationsAsync(config, report, forceEmail, ct);
-        }
+            var report = _diskMonitor.CollectReport(config);
+            report.WindowsUpdate = _windowsUpdates.GetSnapshot();
+            report.AgentDiagnostics = _control.Diagnostics;
+            report.UptimeSeconds = Math.Max(0, Environment.TickCount64 / 1000);
+            report.LastBootAtUtc = DateTime.UtcNow.AddSeconds(-report.UptimeSeconds.Value);
+            report.WatchedServices = _diskMonitor.CollectWatchedServices(_control.Settings);
+            LastReport = report;
+            OnReportUpdated?.Invoke(report);
 
-        return report;
+            Log($"Tarama tamamlandı: {report.Volumes.Count} bölüm, {report.PhysicalDisks.Count} fiziksel disk bulundu. Genel durum: {report.OverallStatus}");
+
+            // 1. Hub Raporu
+            if (config.Hub.Enabled || forceHub)
+            {
+                Log($"VDA Hub'a rapor gönderiliyor ({config.Hub.HubApiUrl})...");
+                var (hubSuccess, hubMsg, _) = await _hubClient.SendReportAsync(config.Hub, report, ct);
+                _control.RecordReportResult(hubSuccess);
+                Log(hubSuccess ? $"✓ VDA Hub: {hubMsg}" : $"✗ VDA Hub Hatası: {hubMsg}");
+            }
+
+            // 2. Brevo E-Posta İşlemleri
+            if (config.Brevo.Enabled || forceEmail)
+            {
+                await HandleBrevoNotificationsAsync(config, report, forceEmail, ct);
+            }
+
+            return report;
+        }
+        finally { _reportGate.Release(); }
     }
 
     private async Task HandleBrevoNotificationsAsync(
@@ -141,6 +160,7 @@ public class ControllerEngine
         Log("Arka plan izleme döngüsü başlatıldı.");
         var backupLoop = RunBackupCommandLoopAsync(ct);
         var updateLoop = _windowsUpdates.RunAsync(ct);
+        var controlLoop = RunControlLoopAsync(ct);
 
         // İlk döngüyü hemen çalıştır
         try
@@ -154,11 +174,12 @@ public class ControllerEngine
 
         while (!ct.IsCancellationRequested)
         {
-            int intervalMinutes = Math.Max(1, _configService.Current.CheckIntervalMinutes);
+            int intervalMinutes = _control.Settings.ReportIntervalMinutes;
             try
             {
-                await Task.Delay(TimeSpan.FromMinutes(intervalMinutes), ct);
+                await Task.Delay(TimeSpan.FromSeconds(15), ct);
                 if (ct.IsCancellationRequested) break;
+                if (Stopwatch.GetElapsedTime(Interlocked.Read(ref _lastCycleTimestamp)) < TimeSpan.FromMinutes(intervalMinutes)) continue;
 
                 await ExecuteCheckCycleAsync(ct: ct);
             }
@@ -174,7 +195,22 @@ public class ControllerEngine
 
         try { await backupLoop; } catch (TaskCanceledException) { }
         await updateLoop;
+        try { await controlLoop; } catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
         Log("Arka plan izleme döngüsü sonlandırıldı.");
+    }
+
+    private async Task RunControlLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                if (await _control.PollAsync(ct)) await ExecuteCheckCycleAsync(ct: ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception) { Log("Agent yönetim döngüsü tamamlanamadı; sonraki bağlantıda yeniden denenecek."); }
+            await Task.Delay(TimeSpan.FromSeconds(30), ct);
+        }
     }
 
     private async Task RunBackupCommandLoopAsync(CancellationToken ct)
