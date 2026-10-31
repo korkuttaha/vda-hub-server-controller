@@ -48,7 +48,7 @@ public class ControllerEngine
         Log("Disk durumu taranıyor...");
 
         var report = _diskMonitor.CollectReport(config);
-        report.WindowsUpdate = _windowsUpdates.Current;
+        report.WindowsUpdate = _windowsUpdates.GetSnapshot();
         LastReport = report;
         OnReportUpdated?.Invoke(report);
 

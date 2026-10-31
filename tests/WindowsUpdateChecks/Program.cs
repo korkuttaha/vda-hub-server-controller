@@ -82,6 +82,11 @@ try
     File.WriteAllText(nullItemsPath, JsonSerializer.Serialize(Success(1, false) with { CheckedAtUtc = clock.GetUtcNow().UtcDateTime, Updates = [null!] }));
     var nullItems = new WindowsUpdateMonitorService(_ => Task.FromResult(Success(0, false)), clock, nullItemsPath);
     Check(nullItems.Current is { PendingCount: 1, Updates.Count: 0 }, "Null detail crashed cache loading.");
+    var sharedPath = Path.Combine(root, "shared.json");
+    var openSettings = new WindowsUpdateMonitorService(_ => throw new Exception("Settings must not scan"), clock, sharedPath);
+    var serviceMonitor = new WindowsUpdateMonitorService(_ => Task.FromResult(Success(4, true)), clock, sharedPath);
+    await serviceMonitor.RefreshIfDueAsync(default);
+    Check(openSettings.GetSnapshot() is { PendingCount: 4, RebootRequired: true }, "Open settings window failed to read the service's newer scan.");
     Console.WriteLine("PASS: scheduling, failure/backoff/recovery, restart cache, bounded payload, heartbeat isolation, cancellation, corrupt/malformed cache.");
 }
 finally

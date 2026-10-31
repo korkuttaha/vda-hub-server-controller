@@ -21,23 +21,38 @@ public sealed class WindowsUpdateMonitorService
         _scan = scan;
         _clock = clock;
         _cachePath = cachePath;
+        _current = ReadCache();
+    }
+
+    private WindowsUpdateSnapshot? ReadCache()
+    {
         try
         {
-            if (File.Exists(cachePath) && new FileInfo(cachePath).Length <= 128 * 1024)
+            if (File.Exists(_cachePath) && new FileInfo(_cachePath).Length <= 128 * 1024)
             {
-                var saved = JsonSerializer.Deserialize<WindowsUpdateSnapshot>(File.ReadAllText(cachePath), Json);
+                var saved = JsonSerializer.Deserialize<WindowsUpdateSnapshot>(File.ReadAllText(_cachePath), Json);
                 if (saved is not null && saved.CheckedAtUtc <= _clock.GetUtcNow().UtcDateTime &&
                     saved.CheckedAtUtc > DateTime.UnixEpoch && (saved.Status == "error" || ValidSuccess(saved)))
-                    _current = Bound(saved);
+                    return Bound(saved);
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
             // A missing/corrupt cache means unknown until a real scan succeeds.
         }
+        return null;
     }
 
     public WindowsUpdateSnapshot? Current => Volatile.Read(ref _current);
+
+    // A settings window may coexist with the service. Read its newer persisted result
+    // before a manual metrics report, without starting a second WUA scan.
+    public WindowsUpdateSnapshot? GetSnapshot()
+    {
+        var saved = ReadCache();
+        var current = Current;
+        return saved is not null && (current is null || saved.CheckedAtUtc > current.CheckedAtUtc) ? saved : current;
+    }
 
     public async Task RunAsync(CancellationToken ct)
     {
