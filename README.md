@@ -21,6 +21,7 @@
   - **Aç/Kapat (Toggle) Opsiyonu:** Brevo e-posta gönderimi arayüzden veya konfigürasyondan tek tıkla açılıp kapatılabilir.
 - **🛡️ Headless çalışma:** İlk eşleştirme veya elle ayar açılışı dışında sürekli GUI yoktur. Ajan taskbar/system-tray ikonu göstermeyen otomatik Windows servisi olarak çalışır.
 - **♻️ Güvenli servis geçişi:** Aynı adlı doğrulanmış eski VDAKor servisini durdurur, kaldırır ve yeni EXE ile yeniden oluşturur; yabancı servis görülürse işlem yapmaz.
+- **🪟 Windows Update takibi:** Windows sunucu servisi 6 saatte bir Windows Update Agent API ile bekleyen yazılım güncellemelerini, güvenlik güncellemelerini ve güncellemeler için yeniden başlatma ihtiyacını sorgular. Yapılandırılmış Windows Update/WSUS kaynağı kullanılır; güncelleme kurulmaz, indirme veya yeniden başlatma komutu verilmez. Ayrı süreçteki tarama 4 dakikada zaman aşımına uğrar; disk/CPU/RAM raporları devam eder. Hatalar 1 saat sonra yeniden denenir. Sonuç ve son başarılı tarama zamanı korumalı agent klasöründe saklanır; rapora en fazla 100 güncelleme ve 96 KiB ayrıntı eklenir, toplam sayılar korunur. Bildirim kanalları Hub'da sunucu bazında seçilir. PC agent modu ve Linux bu taramayı çalıştırmaz.
 - **⌨️ CLI:** Terminal üzerinden test ve yönetim desteği.
 - **📦 Tek Bağımsız Dosya (.exe):** Sunucuda .NET veya ek hiçbir runtime kurulu olmasına gerek yoktur. Tek bir `.exe` dosyası olarak çalıştırılabilir.
 
