@@ -10,6 +10,7 @@ public sealed class ConfigService
 }
 public sealed class DiskMonitorService
 {
+    public List<WatchedServiceSnapshot> CollectWatchedServices(AgentControlSettings settings) => [];
     public ServerStatusReport CollectReport(AppConfig config) => new() { ServerId = config.ServerId };
 }
 public sealed class HubClientService

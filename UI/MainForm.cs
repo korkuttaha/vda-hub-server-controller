@@ -16,7 +16,7 @@ public class MainForm : Form
 
     // Form controls. Continuous work runs only in the headless Windows service.
     private TabControl _tabControl = null!;
-    
+
     // Top banner
     private Label _lblServerTitle = null!;
     private Label _lblServerMeta = null!;
@@ -331,8 +331,8 @@ public class MainForm : Form
         var lblName = new Label { Text = "Sunucu Görünen Adı:", Location = new Point(20, 30), AutoSize = true, Font = new Font("Segoe UI", 9.0f) };
         _txtServerName = new TextBox { Location = new Point(160, 27), Size = new Size(260, 24), Font = new Font("Segoe UI", 9.0f) };
 
-        var lblInterval = new Label { Text = "Tarama Aralığı (Dakika):", Location = new Point(450, 30), AutoSize = true, Font = new Font("Segoe UI", 9.0f) };
-        _numInterval = new NumericUpDown { Location = new Point(610, 27), Size = new Size(80, 24), Minimum = 1, Maximum = 1440, Value = 5, Font = new Font("Segoe UI", 9.0f) };
+        var lblInterval = new Label { Text = "Rapor Aralığı (Hub):", Location = new Point(450, 30), AutoSize = true, Font = new Font("Segoe UI", 9.0f) };
+        _numInterval = new NumericUpDown { Location = new Point(610, 27), Size = new Size(80, 24), Minimum = 1, Maximum = 10, Value = 5, Enabled = false, Font = new Font("Segoe UI", 9.0f) };
 
         grpServer.Controls.AddRange(new Control[] { lblName, _txtServerName, lblInterval, _numInterval });
         tab.Controls.Add(grpServer);
@@ -933,7 +933,7 @@ public class MainForm : Form
     {
         var config = _configService.Current;
         _txtServerName.Text = config.ServerName;
-        _numInterval.Value = Math.Max(1, config.CheckIntervalMinutes);
+        _numInterval.Value = Math.Clamp(_engine.ReportIntervalMinutes, 1, 10);
 
         // Hub
         _chkHubEnabled.Checked = config.Hub.Enabled;
@@ -955,7 +955,6 @@ public class MainForm : Form
     {
         var config = _configService.Current;
         config.ServerName = _txtServerName.Text.Trim();
-        config.CheckIntervalMinutes = (int)_numInterval.Value;
 
         // Hub
         config.Hub.Enabled = _chkHubEnabled.Checked;

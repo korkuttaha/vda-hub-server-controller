@@ -12,9 +12,17 @@ public sealed class WindowsUpdateMonitorService
     private readonly string _cachePath;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private WindowsUpdateSnapshot? _current;
+    private int _intervalMinutes = 60;
+
+    public void SetIntervalMinutes(int minutes)
+    {
+        if (minutes is < 60 or > 360) throw new ArgumentOutOfRangeException(nameof(minutes));
+        Volatile.Write(ref _intervalMinutes, minutes);
+    }
 
     public WindowsUpdateMonitorService() : this(WindowsUpdateScanner.ScanAsync, TimeProvider.System,
-        Path.Combine(ConfigService.InstallDirectory, "windows-update-status.json")) { }
+        Path.Combine(ConfigService.InstallDirectory, "windows-update-status.json"))
+    { }
 
     public WindowsUpdateMonitorService(Func<CancellationToken, Task<WindowsUpdateSnapshot>> scan, TimeProvider clock, string cachePath)
     {
@@ -67,15 +75,20 @@ public sealed class WindowsUpdateMonitorService
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
     }
 
-    public async Task RefreshIfDueAsync(CancellationToken ct)
+    public Task RefreshIfDueAsync(CancellationToken ct) => RefreshAsync(ct, false);
+
+    public Task ScanNowAsync(CancellationToken ct) => RefreshAsync(ct, true);
+
+    private async Task RefreshAsync(CancellationToken ct, bool force)
     {
-        if (!await _gate.WaitAsync(0, ct)) return;
+        if (force) await _gate.WaitAsync(ct);
+        else if (!await _gate.WaitAsync(0, ct)) return;
         try
         {
             var now = _clock.GetUtcNow().UtcDateTime;
             var previous = Current;
-            var interval = previous?.Status == "success" ? TimeSpan.FromHours(6) : TimeSpan.FromHours(1);
-            if (previous is not null && now >= previous.CheckedAtUtc && now - previous.CheckedAtUtc < interval) return;
+            var interval = previous?.Status == "success" ? TimeSpan.FromMinutes(Volatile.Read(ref _intervalMinutes)) : TimeSpan.FromHours(1);
+            if (!force && previous is not null && now >= previous.CheckedAtUtc && now - previous.CheckedAtUtc < interval) return;
 
             WindowsUpdateSnapshot result;
             try
@@ -91,7 +104,8 @@ public sealed class WindowsUpdateMonitorService
             {
                 result = new WindowsUpdateSnapshot
                 {
-                    Status = "error", CheckedAtUtc = _clock.GetUtcNow().UtcDateTime,
+                    Status = "error",
+                    CheckedAtUtc = _clock.GetUtcNow().UtcDateTime,
                     LastSuccessfulScanAtUtc = previous?.LastSuccessfulScanAtUtc,
                     Error = ex is TimeoutException ? "Windows Update taraması zaman aşımına uğradı." :
                         "Windows Update taraması başarısız. Windows Update hizmetini ve güncelleme kaynağına erişimi kontrol edin."
@@ -133,7 +147,9 @@ public sealed class WindowsUpdateMonitorService
             return value with { Status = "error", PendingCount = null, SecurityCount = null, RebootRequired = null, Updates = [], Error = Clip(value.Error, 300) };
         var updates = (value.Updates ?? []).OfType<WindowsUpdateItem>().Take(100).Select(item => item with
         {
-            UpdateId = Clip(item.UpdateId, 128), Title = Clip(item.Title, 300), Severity = Clip(item.Severity, 32),
+            UpdateId = Clip(item.UpdateId, 128),
+            Title = Clip(item.Title, 300),
+            Severity = Clip(item.Severity, 32),
             KbArticleIds = (item.KbArticleIds ?? []).Take(8).Select(kb => Clip(kb, 24)).ToList()
         }).ToList();
         var result = value with { Updates = updates, UpdatesTruncated = value.UpdatesTruncated || value.Updates?.Count > updates.Count };

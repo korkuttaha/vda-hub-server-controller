@@ -23,6 +23,10 @@ public class ServerStatusReport
     public List<PhysicalDiskInfo> PhysicalDisks { get; set; } = new();
     public WindowsUpdateSnapshot? WindowsUpdate { get; set; }
     public SqlBackupServiceSnapshot? SqlBackupService { get; set; }
+    public AgentDiagnostics? AgentDiagnostics { get; set; }
+    public DateTime? LastBootAtUtc { get; set; }
+    public long? UptimeSeconds { get; set; }
+    public List<WatchedServiceSnapshot> WatchedServices { get; set; } = new();
 
     // Summary calculation
     public void RecalculateOverallStatus(int warningThreshold = 80, int criticalThreshold = 90)
