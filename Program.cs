@@ -353,6 +353,7 @@ Seçenekler:
                     services.AddSingleton<BrevoEmailService>();
                     services.AddSingleton<HubClientService>();
                     services.AddSingleton<BackupService>();
+                    services.AddSingleton<WindowsUpdateMonitorService>();
                     services.AddSingleton<ControllerEngine>();
                     services.AddHostedService<WorkerService>();
                 });

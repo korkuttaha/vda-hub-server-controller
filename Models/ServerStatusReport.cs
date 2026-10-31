@@ -21,6 +21,7 @@ public class ServerStatusReport
 
     public List<DiskVolumeInfo> Volumes { get; set; } = new();
     public List<PhysicalDiskInfo> PhysicalDisks { get; set; } = new();
+    public WindowsUpdateSnapshot? WindowsUpdate { get; set; }
 
     // Summary calculation
     public void RecalculateOverallStatus(int warningThreshold = 80, int criticalThreshold = 90)

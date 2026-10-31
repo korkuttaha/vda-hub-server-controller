@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../Models/WindowsUpdateSnapshot.cs" Link="WindowsUpdateSnapshot.cs" />
+    <Compile Include="../../Models/ServerStatusReport.cs" Link="ServerStatusReport.cs" />
+    <Compile Include="../../Models/DiskVolumeInfo.cs" Link="DiskVolumeInfo.cs" />
+    <Compile Include="../../Models/PhysicalDiskInfo.cs" Link="PhysicalDiskInfo.cs" />
+    <Compile Include="../../Models/AppConfig.cs" Link="AppConfig.cs" />
+    <Compile Include="../../Services/WindowsUpdateMonitorService.cs" Link="WindowsUpdateMonitorService.cs" />
+    <Compile Include="../../Services/WindowsUpdateScanner.cs" Link="WindowsUpdateScanner.cs" />
+    <Compile Include="../../Services/ControllerEngine.cs" Link="ControllerEngine.cs" />
+  </ItemGroup>
+</Project>

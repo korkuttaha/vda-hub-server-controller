@@ -9,6 +9,7 @@ public class ControllerEngine
     private readonly BrevoEmailService _brevoService;
     private readonly HubClientService _hubClient;
     private readonly BackupService _backupService;
+    private readonly WindowsUpdateMonitorService _windowsUpdates;
 
     public event Action<string>? OnLog;
     public event Action<ServerStatusReport>? OnReportUpdated;
@@ -20,13 +21,15 @@ public class ControllerEngine
         DiskMonitorService diskMonitor,
         BrevoEmailService brevoService,
         HubClientService hubClient,
-        BackupService backupService)
+        BackupService backupService,
+        WindowsUpdateMonitorService? windowsUpdates = null)
     {
         _configService = configService;
         _diskMonitor = diskMonitor;
         _brevoService = brevoService;
         _hubClient = hubClient;
         _backupService = backupService;
+        _windowsUpdates = windowsUpdates ?? new WindowsUpdateMonitorService();
     }
 
     private void Log(string message)
@@ -45,6 +48,7 @@ public class ControllerEngine
         Log("Disk durumu taranıyor...");
 
         var report = _diskMonitor.CollectReport(config);
+        report.WindowsUpdate = _windowsUpdates.Current;
         LastReport = report;
         OnReportUpdated?.Invoke(report);
 
@@ -136,6 +140,7 @@ public class ControllerEngine
     {
         Log("Arka plan izleme döngüsü başlatıldı.");
         var backupLoop = RunBackupCommandLoopAsync(ct);
+        var updateLoop = _windowsUpdates.RunAsync(ct);
 
         // İlk döngüyü hemen çalıştır
         try
@@ -168,6 +173,7 @@ public class ControllerEngine
         }
 
         try { await backupLoop; } catch (TaskCanceledException) { }
+        await updateLoop;
         Log("Arka plan izleme döngüsü sonlandırıldı.");
     }
 
