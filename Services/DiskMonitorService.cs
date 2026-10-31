@@ -16,6 +16,7 @@ public class DiskMonitorService
             OsVersion = Environment.OSVersion.ToString(),
             Timestamp = DateTime.UtcNow
         };
+        report.SqlBackupService = SqlBackupServiceMonitor.Collect();
 
         // 1. Collect Logical Drive Volumes
         string systemRoot = Path.GetPathRoot(Environment.SystemDirectory) ?? "C:\\";

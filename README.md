@@ -6,6 +6,8 @@
 
 ## 🚀 Temel Özellikler
 
+- **VDA MSSQL Backup servis takibi (1.2.13):** `VdaMssqlBackup` hizmetinin kurulum/çalışma/başlangıç durumu, standart kurulumdaki EXE sürümü ve `schedule-state.json` içindeki son deneme, tamamlanma, güvenli sonuç kodu ve kayıtlı sonraki zaman raporlanır. Eksik veya okunamayan durum dosyası başarı sayılmaz. Plan etkinliği ayrıca doğrulanmaz; kayıtlı sonraki zaman bir yedekleme garantisi değildir. `plan.json`, SQL parolaları, bağlantı dizeleri ve ham loglar okunmaz veya gönderilmez. Servis başlatma/durdurma veya yedekleme komutu çalıştırılmaz.
+
 - **📁 Ayrıntılı Disk & Kapasite Takibi:** Mantıksal sürücülerin toplam boyutu, boş alanı, kullanılan alanı, doluluk yüzdesi ve dosya sistemi (NTFS, ReFS vb.).
 - **💽 Fiziksel Disk & SMART Sağlık Denetimi:** WMI üzerinden fiziksel disk modeli, seri numarası, arayüz türü (NVMe/SCSI/SATA), disk türü ve SMART arıza tahmini.
 - **🌐 VDA Hub Entegrasyonu:** Merkezi Hub API'sine (`POST /api/v1/servers/report`) JSON formatında periyodik durum aktarımı (Bearer Token / X-API-Key destekli).
