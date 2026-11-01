@@ -43,17 +43,10 @@ public sealed class DesktopTrayRunner : ApplicationContext
 
         menu.Items.Add("❌ Kapat ve Çık", null, (_, _) => Exit());
 
-        // Default icon
-        Icon? icon = null;
-        try
-        {
-            icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? Application.ExecutablePath);
-        }
-        catch { }
-
+        // Modern Tray Icon
         _trayIcon = new NotifyIcon
         {
-            Icon = icon ?? SystemIcons.Application,
+            Icon = ResolveTrayIcon(),
             ContextMenuStrip = menu,
             Text = $"VDAKor Desktop Remote (Port {_port})",
             Visible = true
@@ -148,4 +141,95 @@ public sealed class DesktopTrayRunner : ApplicationContext
         await _server.StopAsync();
         ExitThread();
     }
+
+    private static Icon ResolveTrayIcon()
+    {
+        // 1. Gömülü manifest kaynağından yüklemeyi dene
+        try
+        {
+            var asm = typeof(DesktopTrayRunner).Assembly;
+            using var stream = asm.GetManifestResourceStream("VdaHubServerController.Assets.remote-desktop.ico");
+            if (stream != null)
+            {
+                return new Icon(stream);
+            }
+        }
+        catch { }
+
+        // 2. Yanındaki Assets klasöründen yüklemeyi dene
+        try
+        {
+            string baseDir = AppContext.BaseDirectory;
+            string directFile = Path.Combine(baseDir, "Assets", "remote-desktop.ico");
+            if (File.Exists(directFile))
+            {
+                return new Icon(directFile);
+            }
+        }
+        catch { }
+
+        // 3. Exe PE header'ındaki ikonu dene
+        try
+        {
+            string? exe = Environment.ProcessPath ?? Application.ExecutablePath;
+            if (!string.IsNullOrEmpty(exe) && File.Exists(exe))
+            {
+                var assoc = Icon.ExtractAssociatedIcon(exe);
+                if (assoc != null) return assoc;
+            }
+        }
+        catch { }
+
+        // 4. Dinamik modern GDI+ çizimi
+        return CreateFallbackModernIcon();
+    }
+
+    private static Icon CreateFallbackModernIcon()
+    {
+        try
+        {
+            using var bmp = new Bitmap(32, 32);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(Color.Transparent);
+
+                using var penWhite = new Pen(Color.FromArgb(245, 245, 245), 2.2f)
+                {
+                    StartCap = System.Drawing.Drawing2D.LineCap.Round,
+                    EndCap = System.Drawing.Drawing2D.LineCap.Round,
+                    LineJoin = System.Drawing.Drawing2D.LineJoin.Round
+                };
+
+                // Monitör çerçevesi (Yuvarlatılmış)
+                using var screenPath = new System.Drawing.Drawing2D.GraphicsPath();
+                screenPath.AddArc(3.5f, 4f, 3f, 3f, 180, 90);
+                screenPath.AddArc(25.5f, 4f, 3f, 3f, 270, 90);
+                screenPath.AddArc(25.5f, 17f, 3f, 3f, 0, 90);
+                screenPath.AddArc(3.5f, 17f, 3f, 3f, 90, 90);
+                screenPath.CloseFigure();
+                g.DrawPath(penWhite, screenPath);
+
+                // Ayak ve taban
+                g.DrawLine(penWhite, 16f, 20f, 16f, 27f);
+                g.DrawLine(penWhite, 9f, 27f, 23f, 27f);
+
+                // Cyan remote sinyal dalgası (#38BDF8)
+                using var penCyan = new Pen(Color.FromArgb(56, 189, 248), 2.0f)
+                {
+                    StartCap = System.Drawing.Drawing2D.LineCap.Round,
+                    EndCap = System.Drawing.Drawing2D.LineCap.Round
+                };
+                g.DrawArc(penCyan, 13f, 7f, 10f, 10f, 280, 80);
+                g.FillEllipse(new SolidBrush(Color.FromArgb(56, 189, 248)), 14.5f, 14f, 2.8f, 2.8f);
+            }
+            IntPtr hIcon = bmp.GetHicon();
+            return (Icon)Icon.FromHandle(hIcon).Clone();
+        }
+        catch
+        {
+            return SystemIcons.Application;
+        }
+    }
+
 }

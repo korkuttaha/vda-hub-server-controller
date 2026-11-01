@@ -7,6 +7,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\remote-desktop.ico</ApplicationIcon>
     <Version>1.2.14</Version>
     <AssemblyVersion>1.2.14.0</AssemblyVersion>
     <FileVersion>1.2.14.0</FileVersion>
@@ -16,6 +17,7 @@
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <EmbeddedResource Include="WindowsUpdateScan.ps1" LogicalName="VdaHubServerController.WindowsUpdateScan.ps1" />
+    <EmbeddedResource Include="Assets\remote-desktop.ico" LogicalName="VdaHubServerController.Assets.remote-desktop.ico" />
     <Compile Remove="tests/**/*.cs" />
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.12" />
     <PackageReference Include="System.Management" Version="10.0.12" />
