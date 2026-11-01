@@ -77,6 +77,15 @@ public sealed class DesktopInputService
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
 
+    [DllImport("user32.dll")]
+    private static extern bool LockWorkStation();
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    private const int HWND_BROADCAST = 0xFFFF;
+    private const uint WM_SYSCOMMAND = 0x0112;
+    private const int SC_MONITORPOWER = 0xF170;
+
     private const int SM_CXSCREEN = 0;
     private const int SM_CYSCREEN = 1;
     private const int SM_CXVIRTUALSCREEN = 78;
@@ -249,25 +258,49 @@ public sealed class DesktopInputService
     {
         switch (hotkey.ToLowerInvariant())
         {
+            case "win_l" or "lock":
+                LockWorkStation();
+                break;
+            case "vol_mute" or "volume_mute":
+                SendKeyVk(0xAD); // VK_VOLUME_MUTE
+                break;
+            case "vol_down" or "volume_down":
+                SendKeyVk(0xAE); // VK_VOLUME_DOWN
+                break;
+            case "vol_up" or "volume_up":
+                SendKeyVk(0xAF); // VK_VOLUME_UP
+                break;
+            case "media_next":
+                SendKeyVk(0xB0); // VK_MEDIA_NEXT_TRACK
+                break;
+            case "media_prev":
+                SendKeyVk(0xB1); // VK_MEDIA_PREV_TRACK
+                break;
+            case "media_play" or "media_play_pause":
+                SendKeyVk(0xB3); // VK_MEDIA_PLAY_PAUSE
+                break;
+            case "monitor_off" or "display_sleep":
+                SendMessage(new IntPtr(HWND_BROADCAST), WM_SYSCOMMAND, new IntPtr(SC_MONITORPOWER), new IntPtr(2));
+                break;
             case "win_d" or "show_desktop":
                 SendKeyCombo(0x5B, 0x44); // Win + D
                 break;
             case "alt_tab":
                 SendKeyCombo(0x12, 0x09); // Alt + Tab
                 break;
-            case "ctrl_c":
+            case "ctrl_c" or "copy":
                 SendKeyCombo(0x11, 0x43); // Ctrl + C
                 break;
-            case "ctrl_v":
+            case "ctrl_v" or "paste":
                 SendKeyCombo(0x11, 0x56); // Ctrl + V
                 break;
-            case "ctrl_z":
+            case "ctrl_z" or "undo":
                 SendKeyCombo(0x11, 0x5A); // Ctrl + Z
                 break;
-            case "ctrl_a":
+            case "ctrl_a" or "select_all":
                 SendKeyCombo(0x11, 0x41); // Ctrl + A
                 break;
-            case "alt_f4":
+            case "alt_f4" or "close_window":
                 SendKeyCombo(0x12, 0x73); // Alt + F4
                 break;
         }

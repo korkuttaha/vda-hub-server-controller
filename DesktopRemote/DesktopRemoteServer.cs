@@ -245,17 +245,80 @@ public sealed class DesktopRemoteServer
             return ok ? Results.Ok(new { success = true, command = req.Command }) : Results.BadRequest(new { error = "Program başlatılamadı." });
         });
 
-        // 10. Lock / Display Off
+        // 10. Clipboard Sync & Direct Paste
+        _app.MapPost("/api/desktop/clipboard", async (HttpContext context) =>
+        {
+            try
+            {
+                using var reader = new StreamReader(context.Request.Body);
+                string body = await reader.ReadToEndAsync();
+                var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.TryGetProperty("text", out var textProp))
+                {
+                    string text = textProp.GetString() ?? string.Empty;
+                    var thread = new Thread(() =>
+                    {
+                        try
+                        {
+                            Clipboard.SetText(text);
+                        }
+                        catch { }
+                    });
+                    thread.SetApartmentState(ApartmentState.STA);
+                    thread.Start();
+                    thread.Join(1000);
+
+                    bool shouldPaste = doc.RootElement.TryGetProperty("paste", out var pasteProp) && pasteProp.GetBoolean();
+                    if (shouldPaste)
+                    {
+                        Thread.Sleep(50);
+                        _input.SendHotkey("ctrl_v");
+                    }
+
+                    return Results.Ok(new { success = true, pasted = shouldPaste });
+                }
+            }
+            catch { }
+            return Results.BadRequest(new { error = "Geçersiz pano isteği." });
+        });
+
+        _app.MapGet("/api/desktop/clipboard", () =>
+        {
+            string clipboardText = string.Empty;
+            try
+            {
+                var thread = new Thread(() =>
+                {
+                    try
+                    {
+                        if (Clipboard.ContainsText())
+                            clipboardText = Clipboard.GetText();
+                    }
+                    catch { }
+                });
+                thread.SetApartmentState(ApartmentState.STA);
+                thread.Start();
+                thread.Join(1000);
+            }
+            catch { }
+            return Results.Ok(new { text = clipboardText });
+        });
+
+        // 11. Lock / Display Off / System Actions
         _app.MapPost("/api/desktop/power", (DesktopPowerRequest req) =>
         {
             if (req.Action == "lock")
             {
-                Process.Start(new ProcessStartInfo("rundll32.exe", "user32.dll,LockWorkStation") { UseShellExecute = true });
+                _input.SendHotkey("lock");
                 return Results.Ok(new { success = true, message = "Windows kilitlendi." });
             }
-            if (req.Action == "display_off")
+            if (req.Action == "display_off" || req.Action == "monitor_off")
             {
-                // SendMessage(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2)
+                _input.SendHotkey("monitor_off");
+                return Results.Ok(new { success = true, message = "Monitör uykuya alındı." });
+            }
+            if (req.Action == "show_desktop")
+            {
                 _input.SendHotkey("win_d");
                 return Results.Ok(new { success = true, message = "Masaüstüne dönüldü." });
             }
