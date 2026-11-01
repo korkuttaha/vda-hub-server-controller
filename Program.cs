@@ -1,7 +1,9 @@
+﻿using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using VdaHubServerController.Background;
+using VdaHubServerController.DesktopRemote;
 using VdaHubServerController.Services;
 using VdaHubServerController.UI;
 
@@ -37,6 +39,14 @@ internal static class Program
         if (args.Contains("--pc-service", StringComparer.OrdinalIgnoreCase))
         {
             return await RunAsPcServiceAsync(args);
+        }
+
+        // Desktop Remote Host / Server Mode (User Session)
+        if (args.Contains("--desktop-server", StringComparer.OrdinalIgnoreCase) ||
+            args.Contains("--desktop", StringComparer.OrdinalIgnoreCase) ||
+            args.Contains("--remote", StringComparer.OrdinalIgnoreCase))
+        {
+            return await RunDesktopServerAsync(args);
         }
 
         var executableName = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? string.Empty);
@@ -275,6 +285,38 @@ internal static class Program
         return true;
     }
 
+    private static async Task<int> RunDesktopServerAsync(string[] args)
+    {
+        const string mutexName = "Global\\VDAKor_DesktopRemote_Mutex";
+        using var mutex = new Mutex(true, mutexName, out var createdNew);
+        if (!createdNew)
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo("http://localhost:5088") { UseShellExecute = true });
+            }
+            catch { }
+            return 0;
+        }
+
+        ApplicationConfiguration.Initialize();
+        var config = new PcConfigService();
+        int port = 5088;
+        string? apiKey = !string.IsNullOrWhiteSpace(config.Current.ApiKey) ? config.Current.ApiKey : null;
+
+        var screen = new DesktopScreenService();
+        var input = new DesktopInputService();
+        var apps = new DesktopAppManagerService();
+        var server = new DesktopRemoteServer(screen, input, apps, port, apiKey);
+
+        await server.StartAsync();
+
+        var tray = new DesktopTrayRunner(server, port);
+        Application.Run(tray);
+
+        return 0;
+    }
+
     private static async Task<int> RunAsPcServiceAsync(string[] args)
     {
         try
@@ -317,6 +359,7 @@ Kişisel PC modu:
   --pc-agent                : Aynı kişisel PC kurulum modunu açıkça başlatır.
   --reset, --re-enroll      : Önceki servisi ve yapılandırmayı sıfırlayarak temiz eşleştirme ekranını açar.
   --pc-service              : VDAKor PC Agent Windows servisi (arka plan).
+  --desktop-server, --desktop : VDAKor Desktop Remote sunucusunu kullanıcı oturumunda çalıştırır (Port 5088).
 
 Seçenekler:
   (parametre yok)     : İlk kurulumda eşleştirir; sonrasında geçici ayar ekranını açar.

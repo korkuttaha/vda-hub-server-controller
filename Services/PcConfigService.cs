@@ -28,19 +28,30 @@ public sealed class PcConfigService
     public static string EnsureProtectedInstallDirectory()
     {
         Directory.CreateDirectory(InstallDirectory);
-        var security = new DirectorySecurity();
-        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-        foreach (var sidValue in new[] { "S-1-5-18", "S-1-5-32-544" })
+        try
         {
-            var sid = new SecurityIdentifier(sidValue);
-            security.AddAccessRule(new FileSystemAccessRule(
-                sid,
-                FileSystemRights.FullControl,
-                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
-                PropagationFlags.None,
-                AccessControlType.Allow));
+            var security = new DirectorySecurity();
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            foreach (var sidValue in new[] { "S-1-5-18", "S-1-5-32-544" })
+            {
+                var sid = new SecurityIdentifier(sidValue);
+                security.AddAccessRule(new FileSystemAccessRule(
+                    sid,
+                    FileSystemRights.FullControl,
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+            }
+            new DirectoryInfo(InstallDirectory).SetAccessControl(security);
         }
-        new DirectoryInfo(InstallDirectory).SetAccessControl(security);
+        catch (UnauthorizedAccessException)
+        {
+            // Running as standard user / non-elevated desktop session
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[PcConfig] Dizin izinleri güncellenemedi: {ex.Message}");
+        }
         return InstallDirectory;
     }
 
@@ -48,9 +59,9 @@ public sealed class PcConfigService
     {
         lock (Gate)
         {
-            if (File.Exists(_path))
+            try
             {
-                try
+                if (File.Exists(_path))
                 {
                     var loaded = JsonSerializer.Deserialize<PcAgentConfig>(
                         File.ReadAllText(_path),
@@ -61,10 +72,10 @@ public sealed class PcConfigService
                         return _current;
                     }
                 }
-                catch (Exception ex)
-                {
-                    Console.Error.WriteLine($"[PcConfig] Config okunamadı: {ex.Message}");
-                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[PcConfig] Config okunamadı: {ex.Message}");
             }
 
             _current = new PcAgentConfig();
