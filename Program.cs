@@ -43,22 +43,23 @@ internal static class Program
             return await RunAsPcServiceAsync(args);
         }
 
-        // Desktop Remote Host / Server Mode (User Session)
-        if (args.Contains("--desktop-server", StringComparer.OrdinalIgnoreCase) ||
-            args.Contains("--desktop", StringComparer.OrdinalIgnoreCase) ||
-            args.Contains("--remote", StringComparer.OrdinalIgnoreCase))
-        {
-            return await RunDesktopServerAsync(args);
-        }
-
-        var executableName = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? string.Empty);
+        // Explicit PC Agent Enrollment / Status UI
         var pcAgentUi = args.Contains("--pc-agent", StringComparer.OrdinalIgnoreCase) ||
             args.Contains("--reset", StringComparer.OrdinalIgnoreCase) ||
-            args.Contains("--re-enroll", StringComparer.OrdinalIgnoreCase) ||
-            executableName.StartsWith("VDAKorPcAgent", StringComparison.OrdinalIgnoreCase);
+            args.Contains("--re-enroll", StringComparer.OrdinalIgnoreCase);
         if (pcAgentUi)
         {
             return RunPcAgentUi(args);
+        }
+
+        // Desktop Remote Host / Server Mode (Default for VDAKorPcAgent.exe)
+        var executableName = Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? string.Empty);
+        if (args.Contains("--desktop-server", StringComparer.OrdinalIgnoreCase) ||
+            args.Contains("--desktop", StringComparer.OrdinalIgnoreCase) ||
+            args.Contains("--remote", StringComparer.OrdinalIgnoreCase) ||
+            executableName.StartsWith("VDAKorPcAgent", StringComparison.OrdinalIgnoreCase))
+        {
+            return await RunDesktopServerAsync(args);
         }
 
         // 3. Server Controller Windows Service Mode
