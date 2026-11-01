@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -23,7 +23,9 @@ internal static class Program
         // If launched with arguments from terminal, attach to parent console so output is visible
         if (args.Length > 0 &&
             !args.Contains("--service", StringComparer.OrdinalIgnoreCase) &&
-            !args.Contains("--pc-service", StringComparer.OrdinalIgnoreCase))
+            !args.Contains("--pc-service", StringComparer.OrdinalIgnoreCase) &&
+            !args.Contains("--desktop-server", StringComparer.OrdinalIgnoreCase) &&
+            !args.Contains("--desktop", StringComparer.OrdinalIgnoreCase))
         {
             AttachConsole(ATTACH_PARENT_PROCESS);
         }
