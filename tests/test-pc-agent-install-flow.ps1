@@ -4,8 +4,10 @@ $ErrorActionPreference = 'Stop'
 # No real Windows service, enrollment, HTTP request or power command is touched.
 $program = Get-Content (Join-Path $PSScriptRoot '../Program.cs') -Raw
 $start = $program.IndexOf('    private static int RunPcAgentUi(')
-$end = $program.IndexOf('    private static async Task<int> RunAsPcServiceAsync(', $start)
-if ($start -lt 0 -or $end -le $start) { throw 'PC Agent UI flow was not found.' }
+$helper = $program.IndexOf('    private static bool EnsurePcAgentService(', $start)
+# Include the UI and its service helper, excluding unrelated later entry points.
+$end = $program.IndexOf("`n    private static ", $helper + 1)
+if ($start -lt 0 -or $helper -le $start -or $end -le $helper) { throw 'PC Agent UI flow was not found.' }
 $methods = $program.Substring($start, $end - $start)
 # Use a disposable test-only mutex name so a developer's running UI is untouched.
 $methods = $methods.Replace('Global\\VDAKorPcAgent_UI_Mutex', 'VDAKorPcAgent_Test_' + [Guid]::NewGuid().ToString('N'))

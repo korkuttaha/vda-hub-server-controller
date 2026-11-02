@@ -7,6 +7,7 @@ Directory.CreateDirectory(root);
 try
 {
     await ControlChecks.RunAsync(root);
+    await DefenderChecks.RunAsync(root);
     var sqlSnapshot = new SqlBackupServiceSnapshot { Status = "success", Installed = true, CheckedAtUtc = DateTime.UtcNow };
     Check(SqlBackupStateReader.Read(sqlSnapshot, root).ScheduleState == "missing", "Missing SQL scheduler state must be distinct from success.");
     var sqlStateDirectory = Path.Combine(root, "VDA.MssqlBackup.Service", "state");
