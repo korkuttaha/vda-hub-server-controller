@@ -8,6 +8,7 @@ public sealed class WindowsUpdateMonitorService
 {
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, PropertyNameCaseInsensitive = true };
     private readonly Func<CancellationToken, Task<WindowsUpdateSnapshot>> _scan;
+    private readonly Func<CancellationToken, Task<string?>>? _readDefenderVersion;
     private readonly TimeProvider _clock;
     private readonly string _cachePath;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -21,12 +22,14 @@ public sealed class WindowsUpdateMonitorService
     }
 
     public WindowsUpdateMonitorService() : this(WindowsUpdateScanner.ScanAsync, TimeProvider.System,
-        Path.Combine(ConfigService.InstallDirectory, "windows-update-status.json"))
+        Path.Combine(ConfigService.InstallDirectory, "windows-update-status.json"), WindowsUpdateScanner.ReadDefenderSignatureVersionAsync)
     { }
 
-    public WindowsUpdateMonitorService(Func<CancellationToken, Task<WindowsUpdateSnapshot>> scan, TimeProvider clock, string cachePath)
+    public WindowsUpdateMonitorService(Func<CancellationToken, Task<WindowsUpdateSnapshot>> scan, TimeProvider clock, string cachePath,
+        Func<CancellationToken, Task<string?>>? readDefenderVersion = null)
     {
         _scan = scan;
+        _readDefenderVersion = readDefenderVersion;
         _clock = clock;
         _cachePath = cachePath;
         _current = ReadCache();
@@ -59,7 +62,8 @@ public sealed class WindowsUpdateMonitorService
     {
         var saved = ReadCache();
         var current = Current;
-        return saved is not null && (current is null || saved.CheckedAtUtc > current.CheckedAtUtc) ? saved : current;
+        // Reconciliation changes the shared cache without inventing a new WUA scan time.
+        return saved is not null && (current is null || saved.CheckedAtUtc >= current.CheckedAtUtc) ? saved : current;
     }
 
     public async Task RunAsync(CancellationToken ct)
@@ -88,7 +92,16 @@ public sealed class WindowsUpdateMonitorService
             var now = _clock.GetUtcNow().UtcDateTime;
             var previous = Current;
             var interval = previous?.Status == "success" ? TimeSpan.FromMinutes(Volatile.Read(ref _intervalMinutes)) : TimeSpan.FromHours(1);
-            if (!force && previous is not null && now >= previous.CheckedAtUtc && now - previous.CheckedAtUtc < interval) return;
+            if (!force && previous is not null && now >= previous.CheckedAtUtc && now - previous.CheckedAtUtc < interval)
+            {
+                var reconciled = await ReconcileDefenderAsync(previous, ct);
+                if (!ReferenceEquals(previous, reconciled))
+                {
+                    Volatile.Write(ref _current, reconciled);
+                    Save(reconciled);
+                }
+                return;
+            }
 
             WindowsUpdateSnapshot result;
             try
@@ -98,6 +111,7 @@ public sealed class WindowsUpdateMonitorService
                     throw new InvalidDataException("Windows Update did not return a complete successful scan.");
                 now = _clock.GetUtcNow().UtcDateTime;
                 result = Bound(result with { CheckedAtUtc = now, LastSuccessfulScanAtUtc = now, Error = null });
+                result = await ReconcileDefenderAsync(result, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
@@ -115,6 +129,23 @@ public sealed class WindowsUpdateMonitorService
             Save(result);
         }
         finally { _gate.Release(); }
+    }
+
+    private async Task<WindowsUpdateSnapshot> ReconcileDefenderAsync(WindowsUpdateSnapshot snapshot, CancellationToken ct)
+    {
+        if (_readDefenderVersion is null || snapshot.Status != "success" ||
+            !snapshot.Updates.Any(DefenderSignatureReconciler.IsSignature)) return snapshot;
+        try
+        {
+            return DefenderSignatureReconciler.Reconcile(snapshot, await _readDefenderVersion(ct));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception)
+        {
+            // Missing Defender, denied CIM access or timeout must not hide a pending update
+            // or turn an otherwise successful WUA scan into a failure.
+            return snapshot;
+        }
     }
 
     private void Save(WindowsUpdateSnapshot value)

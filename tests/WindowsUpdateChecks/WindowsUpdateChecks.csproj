@@ -17,6 +17,7 @@
     <Compile Include="../../Models/AppConfig.cs" Link="AppConfig.cs" />
     <Compile Include="../../Services/WindowsUpdateMonitorService.cs" Link="WindowsUpdateMonitorService.cs" />
     <Compile Include="../../Services/WindowsUpdateScanner.cs" Link="WindowsUpdateScanner.cs" />
+    <Compile Include="../../Services/DefenderSignatureReconciler.cs" Link="DefenderSignatureReconciler.cs" />
     <Compile Include="../../Services/ControllerEngine.cs" Link="ControllerEngine.cs" />
   </ItemGroup>
 </Project>
