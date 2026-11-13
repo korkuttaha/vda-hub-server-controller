@@ -73,7 +73,12 @@ public sealed class DesktopRemoteServer
         pipeSecurity.AddAccessRule(new PipeAccessRule(
             new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
             PipeAccessRights.FullControl, AccessControlType.Allow));
-        hostBuilder.WebHost.UseNamedPipes(options => options.PipeSecurity = pipeSecurity);
+        hostBuilder.WebHost.UseNamedPipes(options =>
+        {
+            // The signed-in user and the LocalSystem service are different Windows identities.
+            options.CurrentUserOnly = false;
+            options.PipeSecurity = pipeSecurity;
+        });
         hostBuilder.WebHost.ConfigureKestrel(kestrel =>
         {
             kestrel.Limits.MaxRequestBodySize = 128 * 1024;
