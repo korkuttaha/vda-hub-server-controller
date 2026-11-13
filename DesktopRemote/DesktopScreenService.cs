@@ -48,7 +48,6 @@ public sealed class DesktopScreenService
 
     public (int Width, int Height) GetScreenMetrics()
     {
-        DesktopStationHelper.AttachToDefaultDesktop();
         int w = GetSystemMetrics(SM_CXSCREEN);
         int h = GetSystemMetrics(SM_CYSCREEN);
         if (w <= 0 || h <= 0)
@@ -62,8 +61,6 @@ public sealed class DesktopScreenService
 
     public byte[] CaptureJpeg(int quality = 70, float scale = 1.0f, bool drawCursor = true)
     {
-        DesktopStationHelper.AttachToDefaultDesktop();
-
         quality = Math.Clamp(quality, 10, 100);
         scale = Math.Clamp(scale, 0.2f, 1.0f);
 

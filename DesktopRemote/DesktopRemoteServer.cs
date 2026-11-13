@@ -1,6 +1,11 @@
 using System.Diagnostics;
+using System.IO.Pipes;
+using System.Net;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Connections.Features;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
@@ -32,21 +37,18 @@ public sealed class DesktopRemoteServer
     private readonly DesktopInputService _input;
     private readonly DesktopAppManagerService _apps;
     private readonly int _port;
-    private readonly string? _apiKey;
     private WebApplication? _app;
 
     public DesktopRemoteServer(
         DesktopScreenService screen,
         DesktopInputService input,
         DesktopAppManagerService apps,
-        int port = 5088,
-        string? apiKey = null)
+        int port = 5088)
     {
         _screen = screen;
         _input = input;
         _apps = apps;
         _port = port;
-        _apiKey = apiKey;
     }
 
     public int Port => _port;
@@ -56,56 +58,48 @@ public sealed class DesktopRemoteServer
     {
         var hostBuilder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
-            Args = Array.Empty<string>()
+            Args = Array.Empty<string>(),
+            ContentRootPath = AppContext.BaseDirectory
         });
 
         hostBuilder.Logging.ClearProviders();
+        using var identity = WindowsIdentity.GetCurrent();
+        var pipeSecurity = new PipeSecurity();
+        pipeSecurity.AddAccessRule(new PipeAccessRule(
+            new SecurityIdentifier(WellKnownSidType.NetworkSid, null),
+            PipeAccessRights.FullControl, AccessControlType.Deny));
+        pipeSecurity.AddAccessRule(new PipeAccessRule(
+            identity.User!, PipeAccessRights.FullControl, AccessControlType.Allow));
+        pipeSecurity.AddAccessRule(new PipeAccessRule(
+            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
+            PipeAccessRights.FullControl, AccessControlType.Allow));
+        hostBuilder.WebHost.UseNamedPipes(options => options.PipeSecurity = pipeSecurity);
         hostBuilder.WebHost.ConfigureKestrel(kestrel =>
         {
-            kestrel.ListenAnyIP(_port);
-        });
-
-        hostBuilder.Services.AddCors(options =>
-        {
-            options.AddDefaultPolicy(policy =>
-            {
-                policy.AllowAnyOrigin()
-                      .AllowAnyMethod()
-                      .AllowAnyHeader();
-            });
+            kestrel.Limits.MaxRequestBodySize = 128 * 1024;
+            kestrel.ListenLocalhost(_port);
+            kestrel.ListenNamedPipe(PcDesktopRelayWorker.PipeName(Process.GetCurrentProcess().SessionId));
         });
 
         _app = hostBuilder.Build();
-        _app.UseCors();
-
-        // Authentication Middleware / Filter
         _app.Use(async (context, next) =>
         {
-            if (!string.IsNullOrWhiteSpace(_apiKey))
+            if (context.Features.Get<IConnectionNamedPipeFeature>() is not null)
             {
-                // Bypass auth for web favicon / root if query token matches
-                string? token = context.Request.Query["token"];
-                if (string.IsNullOrEmpty(token) && context.Request.Headers.TryGetValue("X-Api-Key", out var headerKey))
+                if (!DesktopStationHelper.IsInteractiveDesktopActive())
                 {
-                    token = headerKey.ToString();
-                }
-                if (string.IsNullOrEmpty(token) && context.Request.Headers.TryGetValue("Authorization", out var authHeader))
-                {
-                    var val = authHeader.ToString();
-                    if (val.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
-                        token = val["Bearer ".Length..].Trim();
-                }
-
-                // If not matched and path starts with /api/, reject
-                if (context.Request.Path.StartsWithSegments("/api") &&
-                    !string.Equals(token, _apiKey, StringComparison.Ordinal))
-                {
-                    context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                    await context.Response.WriteAsJsonAsync(new { error = "Yetkisiz erişim. Geçerli VDAKor token sağlayın." });
+                    context.Response.StatusCode = StatusCodes.Status423Locked;
                     return;
                 }
             }
+            else if (!IsLocalBrowserRequest(context.Request))
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
+            }
 
+            context.Response.Headers.CacheControl = "no-store";
+            context.Response.Headers.XFrameOptions = "DENY";
             await next();
         });
 
@@ -125,9 +119,7 @@ public sealed class DesktopRemoteServer
                 machineName = Environment.MachineName,
                 userName = Environment.UserName,
                 osVersion = Environment.OSVersion.VersionString,
-                screen = new { width = w, height = h },
-                port = _port,
-                hasAuth = !string.IsNullOrWhiteSpace(_apiKey)
+                screen = new { width = w, height = h }
             });
         });
 
@@ -326,7 +318,20 @@ public sealed class DesktopRemoteServer
         });
 
         await _app.StartAsync(ct);
-        Console.WriteLine($"[VDAKor Desktop Remote] Sunucu aktif: http://0.0.0.0:{_port}");
+        Console.WriteLine($"[VDAKor Desktop Remote] Yerel ekran: http://localhost:{_port}");
+    }
+
+    private bool IsLocalBrowserRequest(HttpRequest request)
+    {
+        var host = request.Host.Host.Trim('[', ']');
+        if (request.Host.Port != _port ||
+            (!host.Equals("localhost", StringComparison.OrdinalIgnoreCase) &&
+             !(IPAddress.TryParse(host, out var address) && IPAddress.IsLoopback(address))))
+            return false;
+
+        var origin = request.Headers.Origin.ToString();
+        return request.Headers["Sec-Fetch-Site"].ToString() is not ("cross-site" or "same-site") &&
+            (origin.Length == 0 || origin.Equals($"http://{request.Host}", StringComparison.OrdinalIgnoreCase));
     }
 
     public async Task StopAsync(CancellationToken ct = default)
@@ -624,15 +629,27 @@ public sealed class DesktopRemoteServer
                     list.innerHTML = '<div style="color:var(--text-dim); padding:10px;">Açık pencere bulunamadı.</div>';
                     return;
                 }
-                list.innerHTML = data.apps.map(app => `
-                    <div class="app-item">
-                        <div class="app-title" title="${app.windowTitle}">${app.windowTitle}</div>
-                        <div class="app-actions">
-                            <button class="btn btn-primary" onclick="focusApp(${app.processId})">Öne Getir</button>
-                            <button class="btn btn-danger" onclick="closeApp(${app.processId})">Kapat</button>
-                        </div>
-                    </div>
-                `).join('');
+                list.replaceChildren();
+                for (const app of data.apps) {
+                    const item = document.createElement('div');
+                    item.className = 'app-item';
+                    const title = document.createElement('div');
+                    title.className = 'app-title';
+                    title.textContent = app.windowTitle;
+                    const actions = document.createElement('div');
+                    actions.className = 'app-actions';
+                    const focus = document.createElement('button');
+                    focus.className = 'btn btn-primary';
+                    focus.textContent = 'Öne Getir';
+                    focus.onclick = () => focusApp(app.processId);
+                    const close = document.createElement('button');
+                    close.className = 'btn btn-danger';
+                    close.textContent = 'Kapat';
+                    close.onclick = () => closeApp(app.processId);
+                    actions.append(focus, close);
+                    item.append(title, actions);
+                    list.append(item);
+                }
             } catch (err) {
                 list.innerHTML = '<div style="color:var(--danger); padding:10px;">Hata oluştu.</div>';
             }

@@ -59,7 +59,7 @@ internal static class Program
             args.Contains("--remote", StringComparer.OrdinalIgnoreCase) ||
             executableName.StartsWith("VDAKorPcAgent", StringComparison.OrdinalIgnoreCase))
         {
-            return await RunDesktopServerAsync(args);
+            return RunDesktopServer();
         }
 
         // 3. Server Controller Windows Service Mode
@@ -288,7 +288,7 @@ internal static class Program
         return true;
     }
 
-    private static async Task<int> RunDesktopServerAsync(string[] args)
+    private static int RunDesktopServer()
     {
         const string mutexName = "Global\\VDAKor_DesktopRemote_Mutex";
         using var mutex = new Mutex(true, mutexName, out var createdNew);
@@ -303,16 +303,14 @@ internal static class Program
         }
 
         ApplicationConfiguration.Initialize();
-        var config = new PcConfigService();
         int port = 5088;
-        string? apiKey = !string.IsNullOrWhiteSpace(config.Current.ApiKey) ? config.Current.ApiKey : null;
 
         var screen = new DesktopScreenService();
         var input = new DesktopInputService();
         var apps = new DesktopAppManagerService();
-        var server = new DesktopRemoteServer(screen, input, apps, port, apiKey);
+        var server = new DesktopRemoteServer(screen, input, apps, port);
 
-        await server.StartAsync();
+        server.StartAsync().GetAwaiter().GetResult();
 
         var tray = new DesktopTrayRunner(server, port);
         Application.Run(tray);
@@ -335,6 +333,7 @@ internal static class Program
                     services.AddSingleton<PcPowerCommandService>();
                     services.AddSingleton<PcAgentEngine>();
                     services.AddHostedService<PcWorkerService>();
+                    services.AddHostedService<PcDesktopRelayWorker>();
                 });
 
             var host = builder.Build();
@@ -362,7 +361,7 @@ Kişisel PC modu:
   --pc-agent                : Aynı kişisel PC kurulum modunu açıkça başlatır.
   --reset, --re-enroll      : Önceki servisi ve yapılandırmayı sıfırlayarak temiz eşleştirme ekranını açar.
   --pc-service              : VDAKor PC Agent Windows servisi (arka plan).
-  --desktop-server, --desktop : VDAKor Desktop Remote sunucusunu kullanıcı oturumunda çalıştırır (Port 5088).
+  --desktop-server, --desktop : Oturumdaki VDAKor masaüstü kumandasını tepside çalıştırır.
 
 Seçenekler:
   (parametre yok)     : İlk kurulumda eşleştirir; sonrasında geçici ayar ekranını açar.
