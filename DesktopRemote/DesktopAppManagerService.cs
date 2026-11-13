@@ -57,7 +57,6 @@ public sealed class DesktopAppManagerService
 
     public List<DesktopAppInfo> GetRunningApplications()
     {
-        DesktopStationHelper.AttachToDefaultDesktop();
         var apps = new List<DesktopAppInfo>();
         var seenPids = new HashSet<int>();
         var foregroundHwnd = GetForegroundWindow();
@@ -121,7 +120,8 @@ public sealed class DesktopAppManagerService
         var hDesk = DesktopStationHelper.GetDefaultDesktopHandle();
         if (hDesk != IntPtr.Zero)
         {
-            EnumDesktopWindows(hDesk, Callback, IntPtr.Zero);
+            try { EnumDesktopWindows(hDesk, Callback, IntPtr.Zero); }
+            finally { DesktopStationHelper.CloseDesktop(hDesk); }
         }
         else
         {
@@ -133,7 +133,6 @@ public sealed class DesktopAppManagerService
 
     public bool FocusApplication(int processId)
     {
-        DesktopStationHelper.AttachToDefaultDesktop();
         var targetHwnd = FindMainWindowForProcess(processId);
         if (targetHwnd == IntPtr.Zero) return false;
 
@@ -143,7 +142,6 @@ public sealed class DesktopAppManagerService
 
     public bool CloseApplication(int processId, bool force = false)
     {
-        DesktopStationHelper.AttachToDefaultDesktop();
         try
         {
             using var proc = Process.GetProcessById(processId);
@@ -157,13 +155,10 @@ public sealed class DesktopAppManagerService
             if (targetHwnd != IntPtr.Zero)
             {
                 PostMessage(targetHwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
-                if (proc.WaitForExit(1500))
-                    return true;
+                return true;
             }
 
-            // Fallback to Kill if close message was ignored
-            proc.Kill();
-            return true;
+            return false;
         }
         catch
         {
@@ -175,7 +170,6 @@ public sealed class DesktopAppManagerService
     {
         if (string.IsNullOrWhiteSpace(commandOrPath)) return false;
 
-        DesktopStationHelper.AttachToDefaultDesktop();
         string normalized = commandOrPath.Trim().ToLowerInvariant();
         string target = normalized switch
         {
@@ -232,7 +226,10 @@ public sealed class DesktopAppManagerService
         }
 
         if (hDesk != IntPtr.Zero)
-            EnumDesktopWindows(hDesk, CheckHwnd, IntPtr.Zero);
+        {
+            try { EnumDesktopWindows(hDesk, CheckHwnd, IntPtr.Zero); }
+            finally { DesktopStationHelper.CloseDesktop(hDesk); }
+        }
         else
             EnumWindows(CheckHwnd, IntPtr.Zero);
 

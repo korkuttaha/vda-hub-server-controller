@@ -28,7 +28,7 @@ public sealed class DesktopTrayRunner : ApplicationContext
         };
 
         var menu = new ContextMenuStrip();
-        var titleItem = new ToolStripMenuItem($"🖥️ VDAKor Masaüstü Kumandası ({_port})")
+        var titleItem = new ToolStripMenuItem("🖥️ VDAKor Masaüstü Kumandası")
         {
             Font = new Font(menu.Font, FontStyle.Bold),
             Enabled = false
@@ -48,7 +48,7 @@ public sealed class DesktopTrayRunner : ApplicationContext
         {
             Icon = ResolveTrayIcon(),
             ContextMenuStrip = menu,
-            Text = $"VDAKor Desktop Remote (Port {_port})",
+            Text = "VDAKor Masaüstü Kumandası",
             Visible = true
         };
 
@@ -57,7 +57,7 @@ public sealed class DesktopTrayRunner : ApplicationContext
         _trayIcon.ShowBalloonTip(
             3000,
             "VDAKor Desktop Remote Aktif",
-            $"Masaüstü kumanda sunucusu port {_port} üzerinde dinleniyor.\nTelefonunuzdan erişmek için çift tıklayın.",
+            "Telefonda Bilgisayarlar → Masaüstünü Yönet’i açın.",
             ToolTipIcon.Info
         );
     }
