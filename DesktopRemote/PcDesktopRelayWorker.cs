@@ -1,10 +1,9 @@
 using System.Buffers;
 using System.Diagnostics;
-using System.IO.Pipes;
 using System.Net;
 using System.Net.Http;
 using System.Net.WebSockets;
-using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Hosting;
@@ -23,11 +22,6 @@ public sealed class PcDesktopRelayWorker(PcConfigService config, ILogger<PcDeskt
         AllowAutoRedirect = false
     });
 
-    [DllImport("kernel32.dll")]
-    private static extern uint WTSGetActiveConsoleSessionId();
-
-    internal static string PipeName(int sessionId) => $"VDAKor.PcDesktop.{sessionId}";
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         await Task.Yield();
@@ -37,10 +31,10 @@ public sealed class PcDesktopRelayWorker(PcConfigService config, ILogger<PcDeskt
             try
             {
                 var settings = config.Load();
-                var sessionId = unchecked((int)WTSGetActiveConsoleSessionId());
-                if (sessionId > 0 && PcEnrollmentService.IsEnrolled(settings))
+                var sessionId = DesktopPipe.WTSGetActiveConsoleSessionId();
+                if (PcEnrollmentService.IsEnrolled(settings) && DesktopPipe.GetConsoleUser(sessionId) is { } user)
                 {
-                    using var local = CreateDesktopClient(sessionId);
+                    using var local = CreateDesktopClient(sessionId, user);
                     if (await HasDesktopAsync(local, stoppingToken))
                     {
                         using var socket = new ClientWebSocket();
@@ -79,25 +73,11 @@ public sealed class PcDesktopRelayWorker(PcConfigService config, ILogger<PcDeskt
         }
     }
 
-    private static HttpClient CreateDesktopClient(int sessionId) => new(new SocketsHttpHandler
+    private static HttpClient CreateDesktopClient(uint sessionId, SecurityIdentifier user) => new(new SocketsHttpHandler
     {
         AllowAutoRedirect = false,
         UseProxy = false,
-        ConnectCallback = async (_, ct) =>
-        {
-            var pipe = new NamedPipeClientStream(".", PipeName(sessionId), PipeDirection.InOut,
-                PipeOptions.Asynchronous, System.Security.Principal.TokenImpersonationLevel.Anonymous);
-            try
-            {
-                await pipe.ConnectAsync(1200, ct);
-                return pipe;
-            }
-            catch
-            {
-                await pipe.DisposeAsync();
-                throw;
-            }
-        }
+        ConnectCallback = async (_, ct) => await DesktopPipe.ConnectAsync(sessionId, user, ct)
     })
     {
         BaseAddress = new Uri("http://localhost"),
@@ -110,7 +90,7 @@ public sealed class PcDesktopRelayWorker(PcConfigService config, ILogger<PcDeskt
         return response.IsSuccessStatusCode;
     }
 
-    private static async Task RunConnectionAsync(WebSocket socket, HttpClient local, int sessionId, CancellationToken stoppingToken)
+    private static async Task RunConnectionAsync(WebSocket socket, HttpClient local, uint sessionId, CancellationToken stoppingToken)
     {
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         using var sendLock = new SemaphoreSlim(1, 1);
@@ -129,11 +109,11 @@ public sealed class PcDesktopRelayWorker(PcConfigService config, ILogger<PcDeskt
         }
     }
 
-    private static async Task WatchDesktopAsync(HttpClient local, int sessionId, CancellationToken ct)
+    private static async Task WatchDesktopAsync(HttpClient local, uint sessionId, CancellationToken ct)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(3));
         while (await timer.WaitForNextTickAsync(ct) &&
-               unchecked((int)WTSGetActiveConsoleSessionId()) == sessionId && await HasDesktopAsync(local, ct))
+               DesktopPipe.WTSGetActiveConsoleSessionId() == sessionId && await HasDesktopAsync(local, ct))
         {
         }
     }
@@ -231,7 +211,7 @@ public sealed class PcDesktopRelayWorker(PcConfigService config, ILogger<PcDeskt
         body is { ValueKind: JsonValueKind.Object } value &&
         !value.TryGetProperty("args", out _) &&
         value.TryGetProperty("command", out var command) && command.ValueKind == JsonValueKind.String &&
-        command.GetString() is "chrome" or "spotify" or "steam" or "calc" or "notepad" or "explorer";
+        DesktopAppManagerService.QuickAppTarget(command.GetString()) is not null;
 
     private static bool IsDesktopInput(JsonElement? body)
     {

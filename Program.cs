@@ -290,29 +290,23 @@ internal static class Program
 
     private static int RunDesktopServer()
     {
-        const string mutexName = "Global\\VDAKor_DesktopRemote_Mutex";
+        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+        using var process = Process.GetCurrentProcess();
+        var mutexName = $@"Local\VDAKor_DesktopRemote_{process.SessionId}_{identity.User}";
         using var mutex = new Mutex(true, mutexName, out var createdNew);
         if (!createdNew)
-        {
-            try
-            {
-                Process.Start(new ProcessStartInfo("http://localhost:5088") { UseShellExecute = true });
-            }
-            catch { }
             return 0;
-        }
 
         ApplicationConfiguration.Initialize();
-        int port = 5088;
 
         var screen = new DesktopScreenService();
         var input = new DesktopInputService();
         var apps = new DesktopAppManagerService();
-        var server = new DesktopRemoteServer(screen, input, apps, port);
+        var server = new DesktopRemoteServer(screen, input, apps);
 
         server.StartAsync().GetAwaiter().GetResult();
 
-        var tray = new DesktopTrayRunner(server, port);
+        var tray = new DesktopTrayRunner(server);
         Application.Run(tray);
 
         return 0;

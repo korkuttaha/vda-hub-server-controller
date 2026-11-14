@@ -140,17 +140,10 @@ public sealed class DesktopAppManagerService
         return SetForegroundWindow(targetHwnd);
     }
 
-    public bool CloseApplication(int processId, bool force = false)
+    public bool CloseApplication(int processId)
     {
         try
         {
-            using var proc = Process.GetProcessById(processId);
-            if (force)
-            {
-                proc.Kill();
-                return true;
-            }
-
             var targetHwnd = FindMainWindowForProcess(processId);
             if (targetHwnd != IntPtr.Zero)
             {
@@ -166,33 +159,27 @@ public sealed class DesktopAppManagerService
         }
     }
 
-    public bool LaunchApplication(string commandOrPath, string? arguments = null)
+    internal static string? QuickAppTarget(string? command) => command switch
     {
-        if (string.IsNullOrWhiteSpace(commandOrPath)) return false;
+        "chrome" => "chrome.exe",
+        "spotify" => "spotify.exe",
+        "steam" => "steam.exe",
+        "calc" => "calc.exe",
+        "notepad" => "notepad.exe",
+        "explorer" => "explorer.exe",
+        _ => null
+    };
 
-        string normalized = commandOrPath.Trim().ToLowerInvariant();
-        string target = normalized switch
-        {
-            "chrome" or "google chrome" => "chrome.exe",
-            "edge" or "microsoft edge" => "msedge.exe",
-            "browser" => "https://google.com",
-            "spotify" => "spotify.exe",
-            "steam" => "steam.exe",
-            "calc" or "calculator" => "calc.exe",
-            "notepad" => "notepad.exe",
-            "terminal" or "cmd" => "cmd.exe",
-            "powershell" or "pwsh" => "powershell.exe",
-            "explorer" or "files" => "explorer.exe",
-            "taskmgr" or "task manager" => "taskmgr.exe",
-            _ => commandOrPath.Trim()
-        };
+    internal bool LaunchQuickApp(string? command)
+    {
+        if (QuickAppTarget(command) is not { } target)
+            return false;
 
         try
         {
             var psi = new ProcessStartInfo
             {
                 FileName = target,
-                Arguments = arguments ?? "",
                 UseShellExecute = true
             };
             Process.Start(psi);

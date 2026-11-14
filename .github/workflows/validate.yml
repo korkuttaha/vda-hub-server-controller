@@ -25,5 +25,9 @@ jobs:
       - name: PC Agent installation flow checks
         shell: pwsh
         run: ./tests/test-pc-agent-install-flow.ps1
+      - name: Desktop session isolation
+        env:
+          DOTNET_GENERATE_ASPNET_CERTIFICATE: 'false'
+        run: dotnet run --project tests/DesktopIsolationChecks -c Release
       - name: Windows Update monitoring regression checks
         run: dotnet run --project tests/WindowsUpdateChecks -c Release
