@@ -83,7 +83,7 @@ public sealed class PcStatusForm : Form
 
         var lblRemoteTitle = new Label
         {
-            Text = "🖥️ Masaüstü Kumandası (Desktop Remote · Port 5088)",
+            Text = "🖥️ Masaüstü Kumandası",
             Font = new Font("Segoe UI", 10f, FontStyle.Bold),
             ForeColor = Color.FromArgb(2, 132, 199),
             Location = new Point(16, 12),
@@ -92,7 +92,7 @@ public sealed class PcStatusForm : Form
 
         var lblRemoteDesc = new Label
         {
-            Text = "Telefondan canlı ekran izleme, dokunmatik fare/klavye ve açık programları yönetme motoru.",
+            Text = "Telefonda VDAKor Mobile → Bilgisayarlar → Masaüstünü Yönet’i açın.",
             ForeColor = Color.FromArgb(51, 65, 85),
             Font = new Font("Segoe UI", 9f),
             Location = new Point(16, 36),
@@ -101,7 +101,7 @@ public sealed class PcStatusForm : Form
 
         var autoStartChk = new CheckBox
         {
-            Text = "Windows açılışında masaüstü sunucusunu otomatik başlat",
+            Text = "Windows oturumu açıldığında masaüstü kumandasını başlat",
             Location = new Point(18, 76),
             Size = new Size(500, 24),
             Checked = IsAutoStartEnabled(),
@@ -115,9 +115,9 @@ public sealed class PcStatusForm : Form
 
         var remoteStartBtn = new Button
         {
-            Text = "🌐 Masaüstü Sunucusunu Başlat & Web Kumandayı Aç",
+            Text = "Masaüstü Kumandasını Başlat",
             Location = new Point(16, 112),
-            Size = new Size(360, 42),
+            Size = new Size(244, 42),
             BackColor = Color.FromArgb(2, 132, 199),
             ForeColor = Color.White,
             FlatStyle = FlatStyle.Flat,
@@ -126,33 +126,10 @@ public sealed class PcStatusForm : Form
         remoteStartBtn.FlatAppearance.BorderSize = 0;
         remoteStartBtn.Click += (_, _) => OnStartRemoteClicked();
 
-        var testBtn = new Button
-        {
-            Text = "Test Et",
-            Location = new Point(386, 112),
-            Size = new Size(146, 42),
-            FlatStyle = FlatStyle.Flat,
-            BackColor = Color.White,
-            ForeColor = Color.FromArgb(2, 132, 199),
-            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold)
-        };
-        testBtn.Click += (_, _) =>
-        {
-            try
-            {
-                Process.Start(new ProcessStartInfo("http://localhost:5088") { UseShellExecute = true });
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Tarayıcı açılamadı: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        };
-
         cardRemote.Controls.Add(lblRemoteTitle);
         cardRemote.Controls.Add(lblRemoteDesc);
         cardRemote.Controls.Add(autoStartChk);
         cardRemote.Controls.Add(remoteStartBtn);
-        cardRemote.Controls.Add(testBtn);
         Controls.Add(cardRemote);
 
         // Bottom Action Buttons
@@ -210,10 +187,6 @@ public sealed class PcStatusForm : Form
                 Arguments = "--desktop-server",
                 UseShellExecute = true
             });
-
-            Thread.Sleep(500);
-
-            Process.Start(new ProcessStartInfo("http://localhost:5088") { UseShellExecute = true });
         }
         catch (Exception ex)
         {

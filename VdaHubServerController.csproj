@@ -8,10 +8,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\remote-desktop.ico</ApplicationIcon>
-    <Version>1.2.16</Version>
-    <AssemblyVersion>1.2.16.0</AssemblyVersion>
-    <FileVersion>1.2.16.0</FileVersion>
-    <InformationalVersion>1.2.16</InformationalVersion>
+    <Version>1.2.17</Version>
+    <AssemblyVersion>1.2.17.0</AssemblyVersion>
+    <FileVersion>1.2.17.0</FileVersion>
+    <InformationalVersion>1.2.17</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

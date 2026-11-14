@@ -2,7 +2,6 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices;
-using Microsoft.AspNetCore.Http;
 
 namespace VdaHubServerController.DesktopRemote;
 
@@ -110,71 +109,6 @@ public sealed class DesktopScreenService
             if (isScaled)
             {
                 outputBmp.Dispose();
-            }
-        }
-    }
-
-    public async Task StreamMjpegAsync(
-        HttpContext context,
-        int targetFps = 25,
-        int quality = 65,
-        float scale = 0.75f,
-        CancellationToken ct = default)
-    {
-        targetFps = Math.Clamp(targetFps, 1, 60);
-        int delayMs = 1000 / targetFps;
-
-        var response = context.Response;
-        response.ContentType = "multipart/x-mixed-replace; boundary=--frame";
-        response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
-        response.Headers["Pragma"] = "no-cache";
-        response.Headers["Connection"] = "close";
-
-        var boundaryBytes = System.Text.Encoding.ASCII.GetBytes("\r\n--frame\r\n");
-
-        while (!ct.IsCancellationRequested && !context.RequestAborted.IsCancellationRequested)
-        {
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            byte[] jpeg;
-            try
-            {
-                jpeg = CaptureJpeg(quality, scale);
-            }
-            catch (Exception ex)
-            {
-                Console.Error.WriteLine($"[Stream Error] {ex.Message}");
-                await Task.Delay(200, ct);
-                continue;
-            }
-
-            var header = $"Content-Type: image/jpeg\r\nContent-Length: {jpeg.Length}\r\n\r\n";
-            var headerBytes = System.Text.Encoding.ASCII.GetBytes(header);
-
-            try
-            {
-                await response.Body.WriteAsync(boundaryBytes, ct);
-                await response.Body.WriteAsync(headerBytes, ct);
-                await response.Body.WriteAsync(jpeg, ct);
-                await response.Body.FlushAsync(ct);
-            }
-            catch
-            {
-                // Client disconnected
-                break;
-            }
-
-            sw.Stop();
-            int remaining = delayMs - (int)sw.ElapsedMilliseconds;
-            if (remaining > 0)
-            {
-                try
-                {
-                    await Task.Delay(remaining, ct);
-                }
-                catch (TaskCanceledException)
-                {
-                    break;
-                }
             }
         }
     }

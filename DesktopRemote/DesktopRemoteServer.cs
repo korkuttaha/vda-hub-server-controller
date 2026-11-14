@@ -1,7 +1,4 @@
 using System.Diagnostics;
-using System.IO.Pipes;
-using System.Net;
-using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
@@ -27,7 +24,7 @@ public sealed record DesktopInputRequest(
 );
 
 public sealed record DesktopLaunchRequest(
-    string Command,
+    string? Command,
     string? Args
 );
 
@@ -36,23 +33,17 @@ public sealed class DesktopRemoteServer
     private readonly DesktopScreenService _screen;
     private readonly DesktopInputService _input;
     private readonly DesktopAppManagerService _apps;
-    private readonly int _port;
     private WebApplication? _app;
 
     public DesktopRemoteServer(
         DesktopScreenService screen,
         DesktopInputService input,
-        DesktopAppManagerService apps,
-        int port = 5088)
+        DesktopAppManagerService apps)
     {
         _screen = screen;
         _input = input;
         _apps = apps;
-        _port = port;
     }
-
-    public int Port => _port;
-    public bool IsRunning => _app != null;
 
     public async Task StartAsync(CancellationToken ct = default)
     {
@@ -64,15 +55,10 @@ public sealed class DesktopRemoteServer
 
         hostBuilder.Logging.ClearProviders();
         using var identity = WindowsIdentity.GetCurrent();
-        var pipeSecurity = new PipeSecurity();
-        pipeSecurity.AddAccessRule(new PipeAccessRule(
-            new SecurityIdentifier(WellKnownSidType.NetworkSid, null),
-            PipeAccessRights.FullControl, AccessControlType.Deny));
-        pipeSecurity.AddAccessRule(new PipeAccessRule(
-            identity.User!, PipeAccessRights.FullControl, AccessControlType.Allow));
-        pipeSecurity.AddAccessRule(new PipeAccessRule(
-            new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null),
-            PipeAccessRights.FullControl, AccessControlType.Allow));
+        var owner = identity.User ?? throw new InvalidOperationException("Windows desktop owner is unavailable.");
+        using var process = Process.GetCurrentProcess();
+        var sessionId = checked((uint)process.SessionId);
+        var pipeSecurity = DesktopPipe.CreateSecurity(owner);
         hostBuilder.WebHost.UseNamedPipes(options =>
         {
             // The signed-in user and the LocalSystem service are different Windows identities.
@@ -82,24 +68,21 @@ public sealed class DesktopRemoteServer
         hostBuilder.WebHost.ConfigureKestrel(kestrel =>
         {
             kestrel.Limits.MaxRequestBodySize = 128 * 1024;
-            kestrel.ListenLocalhost(_port);
-            kestrel.ListenNamedPipe(PcDesktopRelayWorker.PipeName(Process.GetCurrentProcess().SessionId));
+            kestrel.ListenNamedPipe(DesktopPipe.Name(sessionId, owner));
         });
 
         _app = hostBuilder.Build();
         _app.Use(async (context, next) =>
         {
-            if (context.Features.Get<IConnectionNamedPipeFeature>() is not null)
-            {
-                if (!DesktopStationHelper.IsInteractiveDesktopActive())
-                {
-                    context.Response.StatusCode = StatusCodes.Status423Locked;
-                    return;
-                }
-            }
-            else if (!IsLocalBrowserRequest(context.Request))
+            if (context.Features.Get<IConnectionNamedPipeFeature>() is null)
             {
                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
+            }
+            if (DesktopPipe.WTSGetActiveConsoleSessionId() != sessionId ||
+                !DesktopStationHelper.IsInteractiveDesktopActive())
+            {
+                context.Response.StatusCode = StatusCodes.Status423Locked;
                 return;
             }
 
@@ -108,14 +91,7 @@ public sealed class DesktopRemoteServer
             await next();
         });
 
-        // 1. Web Controller UI
-        _app.MapGet("/", async context =>
-        {
-            context.Response.ContentType = "text/html; charset=utf-8";
-            await context.Response.WriteAsync(GetEmbeddedWebClientHtml());
-        });
-
-        // 2. Info
+        // Desktop information and frame capture
         _app.MapGet("/api/desktop/info", () =>
         {
             var (w, h) = _screen.GetScreenMetrics();
@@ -128,7 +104,6 @@ public sealed class DesktopRemoteServer
             });
         });
 
-        // 3. Snapshot JPG
         _app.MapGet("/api/desktop/snapshot.jpg", (int? q, float? s) =>
         {
             int quality = q ?? 75;
@@ -137,16 +112,7 @@ public sealed class DesktopRemoteServer
             return Results.File(bytes, "image/jpeg");
         });
 
-        // 4. Live MJPEG Stream
-        _app.MapGet("/api/desktop/stream", async (HttpContext context, int? fps, int? q, float? s) =>
-        {
-            int targetFps = fps ?? 25;
-            int quality = q ?? 65;
-            float scale = s ?? 0.75f;
-            await _screen.StreamMjpegAsync(context, targetFps, quality, scale, context.RequestAborted);
-        });
-
-        // 5. Input
+        // Input and application controls
         _app.MapPost("/api/desktop/input", (DesktopInputRequest req) =>
         {
             if (req == null || string.IsNullOrWhiteSpace(req.Type))
@@ -211,38 +177,34 @@ public sealed class DesktopRemoteServer
             return Results.Ok(new { success = true });
         });
 
-        // 6. Running Apps
         _app.MapGet("/api/desktop/apps", () =>
         {
             var apps = _apps.GetRunningApplications();
             return Results.Ok(new { count = apps.Count, apps });
         });
 
-        // 7. Focus App
         _app.MapPost("/api/desktop/apps/{pid:int}/focus", (int pid) =>
         {
             bool ok = _apps.FocusApplication(pid);
             return ok ? Results.Ok(new { success = true }) : Results.NotFound(new { error = "Pencere bulunamadı veya odaklanamadı." });
         });
 
-        // 8. Close App
-        _app.MapPost("/api/desktop/apps/{pid:int}/close", (int pid, bool? force) =>
+        _app.MapPost("/api/desktop/apps/{pid:int}/close", (int pid) =>
         {
-            bool ok = _apps.CloseApplication(pid, force ?? false);
+            bool ok = _apps.CloseApplication(pid);
             return ok ? Results.Ok(new { success = true }) : Results.BadRequest(new { error = "Uygulama sonlandırılamadı." });
         });
 
-        // 9. Launch App
         _app.MapPost("/api/desktop/launch", (DesktopLaunchRequest req) =>
         {
-            if (string.IsNullOrWhiteSpace(req.Command))
-                return Results.BadRequest(new { error = "Komut veya program yolu boş olamaz." });
+            if (req.Args is not null || DesktopAppManagerService.QuickAppTarget(req.Command) is null)
+                return Results.BadRequest(new { error = "Geçersiz program kısayolu." });
 
-            bool ok = _apps.LaunchApplication(req.Command, req.Args);
+            bool ok = _apps.LaunchQuickApp(req.Command);
             return ok ? Results.Ok(new { success = true, command = req.Command }) : Results.BadRequest(new { error = "Program başlatılamadı." });
         });
 
-        // 10. Clipboard Sync & Direct Paste
+        // Clipboard sync and direct paste
         _app.MapPost("/api/desktop/clipboard", async (HttpContext context) =>
         {
             try
@@ -301,7 +263,7 @@ public sealed class DesktopRemoteServer
             return Results.Ok(new { text = clipboardText });
         });
 
-        // 11. Lock / Display Off / System Actions
+        // Desktop and display actions
         _app.MapPost("/api/desktop/power", (DesktopPowerRequest req) =>
         {
             if (req.Action == "lock")
@@ -323,375 +285,15 @@ public sealed class DesktopRemoteServer
         });
 
         await _app.StartAsync(ct);
-        Console.WriteLine($"[VDAKor Desktop Remote] Yerel ekran: http://localhost:{_port}");
-    }
-
-    private bool IsLocalBrowserRequest(HttpRequest request)
-    {
-        var host = request.Host.Host.Trim('[', ']');
-        if (request.Host.Port != _port ||
-            (!host.Equals("localhost", StringComparison.OrdinalIgnoreCase) &&
-             !(IPAddress.TryParse(host, out var address) && IPAddress.IsLoopback(address))))
-            return false;
-
-        var origin = request.Headers.Origin.ToString();
-        return request.Headers["Sec-Fetch-Site"].ToString() is not ("cross-site" or "same-site") &&
-            (origin.Length == 0 || origin.Equals($"http://{request.Host}", StringComparison.OrdinalIgnoreCase));
     }
 
     public async Task StopAsync(CancellationToken ct = default)
     {
-        if (_app != null)
-        {
-            await _app.StopAsync(ct);
-            await _app.DisposeAsync();
-            _app = null;
-        }
-    }
+        if (_app is null) return;
 
-    private static string GetEmbeddedWebClientHtml()
-    {
-        return """
-<!DOCTYPE html>
-<html lang="tr">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>VDAKor Desktop Remote</title>
-    <style>
-        :root {
-            --primary: #3b82f6;
-            --primary-dark: #1d4ed8;
-            --bg: #0f172a;
-            --card-bg: #1e293b;
-            --text: #f8fafc;
-            --text-dim: #94a3b8;
-            --danger: #ef4444;
-            --success: #10b981;
-            --border: #334155;
-        }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            display: flex;
-            flex-direction: column;
-            height: 100vh;
-            overflow: hidden;
-            touch-action: manipulation;
-        }
-        header {
-            background: var(--card-bg);
-            border-bottom: 1px solid var(--border);
-            padding: 10px 16px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            z-index: 10;
-        }
-        .logo { font-weight: 700; font-size: 1.1rem; color: #fff; display: flex; align-items: center; gap: 8px; }
-        .logo span { color: var(--primary); }
-        .status-badge { font-size: 0.75rem; background: #065f46; color: #34d399; padding: 3px 8px; border-radius: 999px; }
-
-        #screen-container {
-            flex: 1;
-            position: relative;
-            background: #000;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            overflow: hidden;
-        }
-        #desktop-stream {
-            max-width: 100%;
-            max-height: 100%;
-            object-fit: contain;
-            cursor: crosshair;
-            user-select: none;
-            -webkit-user-drag: none;
-        }
-        .controls-panel {
-            background: var(--card-bg);
-            border-top: 1px solid var(--border);
-            padding: 10px 14px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            z-index: 10;
-            max-height: 45vh;
-            overflow-y: auto;
-        }
-        .btn-row {
-            display: flex;
-            gap: 6px;
-            flex-wrap: wrap;
-            align-items: center;
-        }
-        .btn {
-            background: #334155;
-            color: #fff;
-            border: none;
-            padding: 8px 12px;
-            border-radius: 8px;
-            font-size: 0.85rem;
-            font-weight: 600;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-            touch-action: manipulation;
-        }
-        .btn:hover { background: #475569; }
-        .btn:active { transform: scale(0.97); }
-        .btn-primary { background: var(--primary); }
-        .btn-primary:hover { background: var(--primary-dark); }
-        .btn-danger { background: var(--danger); }
-        .text-input-group {
-            display: flex;
-            gap: 6px;
-            width: 100%;
-        }
-        input[type="text"] {
-            flex: 1;
-            background: #0f172a;
-            border: 1px solid var(--border);
-            color: #fff;
-            padding: 8px 12px;
-            border-radius: 8px;
-            font-size: 0.9rem;
-        }
-        input[type="text"]:focus { outline: none; border-color: var(--primary); }
-
-        /* Modal Sheet */
-        .sheet {
-            display: none;
-            position: fixed;
-            bottom: 0; left: 0; right: 0;
-            background: var(--card-bg);
-            border-top: 2px solid var(--primary);
-            border-radius: 16px 16px 0 0;
-            padding: 16px;
-            max-height: 70vh;
-            overflow-y: auto;
-            z-index: 100;
-            box-shadow: 0 -10px 25px rgba(0,0,0,0.5);
-        }
-        .sheet.active { display: block; }
-        .sheet-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 12px;
-        }
-        .app-item {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            background: #0f172a;
-            border: 1px solid var(--border);
-            padding: 8px 12px;
-            border-radius: 8px;
-            margin-bottom: 6px;
-        }
-        .app-title { font-size: 0.85rem; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 65%; }
-        .app-actions { display: flex; gap: 6px; }
-        .app-actions button { padding: 4px 8px; font-size: 0.75rem; border-radius: 6px; }
-    </style>
-</head>
-<body>
-    <header>
-        <div class="logo">🖥️ VDAKor <span>Remote</span></div>
-        <div id="status" class="status-badge">● Canlı</div>
-    </header>
-
-    <div id="screen-container">
-        <img id="desktop-stream" src="/api/desktop/stream?fps=20&quality=65&scale=0.75" alt="Canlı Masaüstü" />
-    </div>
-
-    <div class="controls-panel">
-        <div class="btn-row">
-            <button class="btn" onclick="sendMouseClick('left')">🖱️ Sol Tık</button>
-            <button class="btn" onclick="sendMouseClick('right')">🖱️ Sağ Tık</button>
-            <button class="btn" onclick="sendMouseClick('double')">⚡ Çift Tık</button>
-            <button class="btn" onclick="sendScroll(-240)">▲ Yukarı</button>
-            <button class="btn" onclick="sendScroll(240)">▼ Aşağı</button>
-            <button class="btn btn-primary" onclick="openAppsSheet()">📱 Programlar</button>
-            <button class="btn" onclick="sendHotkey('win_d')">🪟 Masaüstü</button>
-        </div>
-
-        <div class="text-input-group">
-            <input type="text" id="type-box" placeholder="PC'ye yazı yaz veya komut gir..." onkeydown="if(event.key==='Enter') sendTypedText()" />
-            <button class="btn btn-primary" onclick="sendTypedText()">Yaz</button>
-            <button class="btn" onclick="sendKey('enter')">↵ Enter</button>
-            <button class="btn" onclick="sendKey('backspace')">⌫ Sil</button>
-        </div>
-    </div>
-
-    <!-- Apps Modal Sheet -->
-    <div id="apps-sheet" class="sheet">
-        <div class="sheet-header">
-            <h3>⚡ Açık Programlar & Başlatıcı</h3>
-            <button class="btn btn-danger" onclick="closeAppsSheet()">✕ Kapat</button>
-        </div>
-
-        <div style="margin-bottom: 14px;">
-            <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:6px;">HIZLI BAŞLAT:</div>
-            <div class="btn-row">
-                <button class="btn" onclick="launchApp('chrome')">🌐 Chrome</button>
-                <button class="btn" onclick="launchApp('spotify')">🎵 Spotify</button>
-                <button class="btn" onclick="launchApp('steam')">🎮 Steam</button>
-                <button class="btn" onclick="launchApp('calc')">🔢 Hesap Makinesi</button>
-                <button class="btn" onclick="launchApp('notepad')">📝 Not Defteri</button>
-                <button class="btn" onclick="launchApp('explorer')">📁 Dosyalar</button>
-            </div>
-        </div>
-
-        <div style="display:flex; gap:6px; margin-bottom:12px;">
-            <input type="text" id="custom-app-input" placeholder="Özel program veya yol (örn: code, cmd, link)" />
-            <button class="btn btn-primary" onclick="launchCustomApp()">Başlat</button>
-        </div>
-
-        <div style="font-size:0.8rem; color:var(--text-dim); margin-bottom:8px;">AÇIK PENCERELER:</div>
-        <div id="apps-list">Yükleniyor...</div>
-    </div>
-
-    <script>
-        const img = document.getElementById('desktop-stream');
-
-        // Touch & Click Mapping
-        img.addEventListener('click', (e) => {
-            const rect = img.getBoundingClientRect();
-            const normX = (e.clientX - rect.left) / rect.width;
-            const normY = (e.clientY - rect.top) / rect.height;
-            sendInput({ type: 'click', x: normX, y: normY });
-        });
-
-        // Context menu on long press / right click on canvas
-        img.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-            const rect = img.getBoundingClientRect();
-            const normX = (e.clientX - rect.left) / rect.width;
-            const normY = (e.clientY - rect.top) / rect.height;
-            sendInput({ type: 'right_click', x: normX, y: normY });
-        });
-
-        async function sendInput(data) {
-            try {
-                await fetch('/api/desktop/input', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data)
-                });
-            } catch (err) {
-                console.error('Input hatası:', err);
-            }
-        }
-
-        function sendMouseClick(btn) {
-            if (btn === 'left') sendInput({ type: 'click' });
-            else if (btn === 'right') sendInput({ type: 'right_click' });
-            else if (btn === 'double') sendInput({ type: 'double_click' });
-        }
-
-        function sendScroll(delta) {
-            sendInput({ type: 'scroll', dy: delta });
-        }
-
-        function sendKey(key) {
-            sendInput({ type: 'key', key: key });
-        }
-
-        function sendHotkey(hotkey) {
-            sendInput({ type: 'hotkey', hotkey: hotkey });
-        }
-
-        function sendTypedText() {
-            const box = document.getElementById('type-box');
-            const val = box.value;
-            if (!val) return;
-            sendInput({ type: 'text', text: val });
-            box.value = '';
-        }
-
-        // Apps Sheet
-        async function openAppsSheet() {
-            document.getElementById('apps-sheet').classList.add('active');
-            await loadApps();
-        }
-
-        function closeAppsSheet() {
-            document.getElementById('apps-sheet').classList.remove('active');
-        }
-
-        async function loadApps() {
-            const list = document.getElementById('apps-list');
-            list.innerHTML = 'Yükleniyor...';
-            try {
-                const res = await fetch('/api/desktop/apps');
-                const data = await res.json();
-                if (!data.apps || data.apps.length === 0) {
-                    list.innerHTML = '<div style="color:var(--text-dim); padding:10px;">Açık pencere bulunamadı.</div>';
-                    return;
-                }
-                list.replaceChildren();
-                for (const app of data.apps) {
-                    const item = document.createElement('div');
-                    item.className = 'app-item';
-                    const title = document.createElement('div');
-                    title.className = 'app-title';
-                    title.textContent = app.windowTitle;
-                    const actions = document.createElement('div');
-                    actions.className = 'app-actions';
-                    const focus = document.createElement('button');
-                    focus.className = 'btn btn-primary';
-                    focus.textContent = 'Öne Getir';
-                    focus.onclick = () => focusApp(app.processId);
-                    const close = document.createElement('button');
-                    close.className = 'btn btn-danger';
-                    close.textContent = 'Kapat';
-                    close.onclick = () => closeApp(app.processId);
-                    actions.append(focus, close);
-                    item.append(title, actions);
-                    list.append(item);
-                }
-            } catch (err) {
-                list.innerHTML = '<div style="color:var(--danger); padding:10px;">Hata oluştu.</div>';
-            }
-        }
-
-        async function focusApp(pid) {
-            await fetch(`/api/desktop/apps/${pid}/focus`, { method: 'POST' });
-            closeAppsSheet();
-        }
-
-        async function closeApp(pid) {
-            if (confirm('Bu programı kapatmak istediğinize emin misiniz?')) {
-                await fetch(`/api/desktop/apps/${pid}/close`, { method: 'POST' });
-                await loadApps();
-            }
-        }
-
-        async function launchApp(cmd) {
-            await fetch('/api/desktop/launch', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command: cmd })
-            });
-            closeAppsSheet();
-        }
-
-        async function launchCustomApp() {
-            const input = document.getElementById('custom-app-input');
-            const val = input.value.trim();
-            if (!val) return;
-            await launchApp(val);
-            input.value = '';
-        }
-    </script>
-</body>
-</html>
-""";
+        await _app.StopAsync(ct);
+        await _app.DisposeAsync();
+        _app = null;
     }
 }
 

@@ -1,9 +1,7 @@
-using System.Diagnostics;
 using System.Drawing;
 using System.Reflection;
 using System.Windows.Forms;
 using Microsoft.Win32;
-using VdaHubServerController.Services;
 
 namespace VdaHubServerController.DesktopRemote;
 
@@ -15,12 +13,10 @@ public sealed class DesktopTrayRunner : ApplicationContext
     private readonly DesktopRemoteServer _server;
     private readonly NotifyIcon _trayIcon;
     private readonly ToolStripMenuItem _autoStartItem;
-    private readonly int _port;
 
-    public DesktopTrayRunner(DesktopRemoteServer server, int port)
+    public DesktopTrayRunner(DesktopRemoteServer server)
     {
         _server = server;
-        _port = port;
 
         _autoStartItem = new ToolStripMenuItem("🚀 Windows ile Birlikte Başlat", null, ToggleAutoStart)
         {
@@ -36,7 +32,7 @@ public sealed class DesktopTrayRunner : ApplicationContext
         menu.Items.Add(titleItem);
         menu.Items.Add(new ToolStripSeparator());
 
-        menu.Items.Add("🌐 Web Kumandayı Aç", null, (_, _) => OpenWebClient());
+        menu.Items.Add("Bağlantı Bilgisi", null, (_, _) => ShowConnectionInfo());
         menu.Items.Add("📱 Açık Programları Göster", null, (_, _) => ShowAppsDialog());
         menu.Items.Add(_autoStartItem);
         menu.Items.Add(new ToolStripSeparator());
@@ -52,7 +48,7 @@ public sealed class DesktopTrayRunner : ApplicationContext
             Visible = true
         };
 
-        _trayIcon.DoubleClick += (_, _) => OpenWebClient();
+        _trayIcon.DoubleClick += (_, _) => ShowConnectionInfo();
 
         _trayIcon.ShowBalloonTip(
             3000,
@@ -62,21 +58,9 @@ public sealed class DesktopTrayRunner : ApplicationContext
         );
     }
 
-    private void OpenWebClient()
-    {
-        try
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = $"http://localhost:{_port}",
-                UseShellExecute = true
-            });
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show($"Tarayıcı açılamadı: {ex.Message}", "Hata", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
+    private static void ShowConnectionInfo() => MessageBox.Show(
+        "Telefonda VDAKor Mobile → Bilgisayarlar → Masaüstünü Yönet’i açın.",
+        "VDAKor Masaüstü Kumandası", MessageBoxButtons.OK, MessageBoxIcon.Information);
 
     private void ShowAppsDialog()
     {
